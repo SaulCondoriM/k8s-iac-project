@@ -1,0 +1,298 @@
+---
+# ServiceAccount para el drift monitor
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: drift-monitor
+  namespace: default
+
+---
+# Role con permisos para leer recursos de Kubernetes
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: drift-monitor-role
+  namespace: default
+rules:
+  - apiGroups: ["", "apps", "autoscaling"]
+    resources: ["pods", "services", "deployments", "replicasets", "horizontalpodautoscalers", "configmaps"]
+    verbs: ["get", "list", "watch"]
+
+---
+# RoleBinding para asociar el Role con el ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: drift-monitor-binding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: drift-monitor-role
+subjects:
+  - kind: ServiceAccount
+    name: drift-monitor
+    namespace: default
+
+---
+# ClusterRole para leer nodos
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: drift-monitor-cluster-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: drift-monitor-cluster-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: drift-monitor-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: drift-monitor
+    namespace: default
+
+---
+# ConfigMap con los playbooks y scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drift-monitor-config
+  namespace: default
+data:
+  drift-check.sh: |
+    #!/bin/bash
+    
+    echo "=========================================="
+    echo "Anti-Drift Monitor - $(date)"
+    echo "Chapter 2: Principles of Cloud Age Infrastructure"
+    echo "=========================================="
+    echo ""
+    
+    # Configurar AWS
+    export AWS_DEFAULT_REGION=us-east-1
+    
+    # Actualizar kubeconfig
+    echo "Configuring kubectl..."
+    aws eks update-kubeconfig --name k8s-autoscaling-cluster --region us-east-1 >/dev/null 2>&1
+    
+    echo "Starting drift detection checks..."
+    echo ""
+    
+    DRIFT_DETECTED=false
+    
+    # 1. Verificar número de nodos
+    echo "📊 1. Verificando número de nodos..."
+    CURRENT_NODES=$(kubectl get nodes --no-headers | wc -l)
+    EXPECTED_MIN=2
+    EXPECTED_MAX=5
+    echo "   Nodos actuales: $CURRENT_NODES (Esperado: $EXPECTED_MIN-$EXPECTED_MAX)"
+    if [ "$CURRENT_NODES" -lt "$EXPECTED_MIN" ] || [ "$CURRENT_NODES" -gt "$EXPECTED_MAX" ]; then
+        echo "   ⚠️  DRIFT DETECTADO: Número de nodos fuera del rango"
+        DRIFT_DETECTED=true
+    else
+        echo "   ✓ OK"
+    fi
+    
+    # 2. Verificar HPA configurado
+    echo ""
+    echo "📊 2. Verificando HPA..."
+    HPA_EXISTS=$(kubectl get hpa do-sample-app-hpa --no-headers 2>/dev/null | wc -l)
+    if [ "$HPA_EXISTS" -eq 0 ]; then
+        echo "   ⚠️  DRIFT DETECTADO: HPA no existe"
+        DRIFT_DETECTED=true
+    else
+        HPA_MIN=$(kubectl get hpa do-sample-app-hpa -o jsonpath='{.spec.minReplicas}')
+        HPA_MAX=$(kubectl get hpa do-sample-app-hpa -o jsonpath='{.spec.maxReplicas}')
+        echo "   HPA configurado: min=$HPA_MIN, max=$HPA_MAX"
+        if [ "$HPA_MIN" -ne 1 ] || [ "$HPA_MAX" -ne 10 ]; then
+            echo "   ⚠️  DRIFT DETECTADO: Valores de HPA incorrectos (Esperado: min=1, max=10)"
+            DRIFT_DETECTED=true
+        else
+            echo "   ✓ OK"
+        fi
+    fi
+    
+    # 3. Verificar Cluster Autoscaler
+    echo ""
+    echo "📊 3. Verificando Cluster Autoscaler..."
+    CA_PODS=$(kubectl get pods -n kube-system -l app=cluster-autoscaler --field-selector=status.phase=Running --no-headers | wc -l)
+    if [ "$CA_PODS" -eq 0 ]; then
+        echo "   ⚠️  DRIFT DETECTADO: Cluster Autoscaler no está corriendo"
+        DRIFT_DETECTED=true
+    else
+        echo "   Cluster Autoscaler: $CA_PODS pod(s) corriendo"
+        echo "   ✓ OK"
+    fi
+    
+    # 4. Verificar aplicación
+    echo ""
+    echo "📊 4. Verificando aplicación do-sample-app..."
+    APP_DEPLOYMENT=$(kubectl get deployment do-sample-app --no-headers 2>/dev/null | wc -l)
+    if [ "$APP_DEPLOYMENT" -eq 0 ]; then
+        echo "   ⚠️  DRIFT DETECTADO: Deployment no existe"
+        DRIFT_DETECTED=true
+    else
+        APP_IMAGE=$(kubectl get deployment do-sample-app -o jsonpath='{.spec.template.spec.containers[0].image}')
+        EXPECTED_IMAGE="978848629209.dkr.ecr.us-east-1.amazonaws.com/do-sample-app:v1.0.0"
+        echo "   Imagen actual: $APP_IMAGE"
+        if [ "$APP_IMAGE" != "$EXPECTED_IMAGE" ]; then
+            echo "   ⚠️  DRIFT DETECTADO: Imagen incorrecta"
+            DRIFT_DETECTED=true
+        else
+            echo "   ✓ OK"
+        fi
+    fi
+    
+    # 5. Verificar PostgreSQL
+    echo ""
+    echo "📊 5. Verificando PostgreSQL..."
+    PG_PODS=$(kubectl get pods -l app.kubernetes.io/name=postgresql --field-selector=status.phase=Running --no-headers | wc -l)
+    if [ "$PG_PODS" -eq 0 ]; then
+        echo "   ⚠️  DRIFT DETECTADO: PostgreSQL no está corriendo"
+        DRIFT_DETECTED=true
+    else
+        echo "   PostgreSQL: $PG_PODS pod(s) corriendo"
+        echo "   ✓ OK"
+    fi
+    
+    # 6. Verificar Metrics Server
+    echo ""
+    echo "📊 6. Verificando Metrics Server..."
+    MS_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=metrics-server --field-selector=status.phase=Running --no-headers | wc -l)
+    if [ "$MS_PODS" -eq 0 ]; then
+        echo "   ⚠️  DRIFT DETECTADO: Metrics Server no está corriendo"
+        DRIFT_DETECTED=true
+    else
+        echo "   Metrics Server: $MS_PODS pod(s) corriendo"
+        echo "   ✓ OK"
+    fi
+    
+    # 7. Verificar servicios LoadBalancer
+    echo ""
+    echo "📊 7. Verificando servicios LoadBalancer..."
+    LB_COUNT=$(kubectl get svc -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.metadata.name}{"\n"}{end}' | wc -l)
+    echo "   LoadBalancers activos: $LB_COUNT"
+    if [ "$LB_COUNT" -lt 2 ]; then
+        echo "   ⚠️  DRIFT DETECTADO: Faltan LoadBalancers (Esperado: ≥2)"
+        DRIFT_DETECTED=true
+    else
+        echo "   ✓ OK"
+    fi
+    
+    # Resumen final
+    echo ""
+    echo "============================================"
+    echo "Drift Checks Completed: $(date)"
+    echo "============================================"
+    if [ "$DRIFT_DETECTED" = true ]; then
+        echo "❌ RESULTADO: DRIFT DETECTADO"
+        echo "   Se requiere corrección manual o re-aplicación de código"
+        echo ""
+        echo "Remediación sugerida:"
+        echo "   kubectl apply -f manifests-aws/"
+        exit 1
+    else
+        echo "✅ RESULTADO: NO HAY DRIFT"
+        echo "   La infraestructura coincide con el código"
+        echo "   Implementando: 'Minimize Variation' (Chapter 2)"
+        exit 0
+    fi
+
+---
+# CronJob que ejecuta el drift check cada hora
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drift-monitor
+  namespace: default
+  labels:
+    app: drift-monitor
+    purpose: infrastructure-drift-detection
+spec:
+  # Ejecutar cada hora (minuto 0)
+  schedule: "0 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: drift-monitor
+        spec:
+          serviceAccountName: drift-monitor
+          restartPolicy: OnFailure
+          containers:
+          - name: drift-checker
+            image: 978848629209.dkr.ecr.us-east-1.amazonaws.com/drift-monitor:v1.0.0
+            imagePullPolicy: Always
+            command: ["/bin/bash"]
+            args: ["/scripts/drift-check.sh"]
+            env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+            - name: CLUSTER_NAME
+              value: "k8s-autoscaling-cluster"
+            # AWS credentials se obtienen automáticamente del IAM role del nodo
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+          volumes:
+          - name: scripts
+            configMap:
+              name: drift-monitor-config
+              defaultMode: 0755
+
+---
+# Job manual para ejecutar el drift check inmediatamente
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: drift-monitor-manual
+  namespace: default
+  labels:
+    app: drift-monitor
+    purpose: manual-drift-check
+spec:
+  ttlSecondsAfterFinished: 300  # Mantener el Job por 5 minutos después de completarse
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: drift-monitor
+    spec:
+      serviceAccountName: drift-monitor
+      restartPolicy: OnFailure
+      containers:
+      - name: drift-checker
+        image: 978848629209.dkr.ecr.us-east-1.amazonaws.com/drift-monitor:v1.0.0
+        imagePullPolicy: Always
+        command: ["/bin/bash"]
+        args: ["/scripts/drift-check.sh"]
+        env:
+        - name: AWS_DEFAULT_REGION
+          value: "us-east-1"
+        - name: CLUSTER_NAME
+          value: "k8s-autoscaling-cluster"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      volumes:
+      - name: scripts
+        configMap:
+          name: drift-monitor-config
+          defaultMode: 0755

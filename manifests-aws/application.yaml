@@ -1,0 +1,92 @@
+# Application Deployment for AWS EKS
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: do-sample-app
+  namespace: default
+  labels:
+    app: do-sample-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: do-sample-app
+  template:
+    metadata:
+      labels:
+        app: do-sample-app
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: do-sample-app
+        image: 978848629209.dkr.ecr.us-east-1.amazonaws.com/do-sample-app:v1.0.0
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "25m"
+          limits:
+            memory: "64Mi"
+            cpu: "50m"
+        envFrom:
+        - secretRef:
+            name: pg-connection
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: do-sample-app-service
+  namespace: default
+  labels:
+    app: do-sample-app
+spec:
+  type: LoadBalancer
+  selector:
+    app: do-sample-app
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+    name: http
+  sessionAffinity: None
+---
+# Service for Prometheus scraping
+apiVersion: v1
+kind: Service
+metadata:
+  name: do-sample-app-metrics
+  namespace: default
+  labels:
+    app: do-sample-app
+spec:
+  type: ClusterIP
+  selector:
+    app: do-sample-app
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080
+    name: metrics

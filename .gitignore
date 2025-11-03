@@ -1,0 +1,163 @@
+# Git ignore file for Infrastructure as Code project
+# Chapter 4: Define Everything as Code
+
+# ============================================
+# Secrets and Sensitive Data
+# ============================================
+# NEVER commit secrets, credentials, or sensitive data
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*.env
+.env.*
+secrets/
+*.secret
+credentials.yaml
+kubeconfig
+.kube/
+*-credentials.json
+service-account*.json
+
+# AWS credentials
+.aws/
+aws-credentials
+credentials
+
+# Terraform state files (if used)
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# ============================================
+# Temporary and Build Files
+# ============================================
+# Build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Docker build cache
+.dockerignore.bak
+docker-compose.override.yml
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS files
+.DS_Store
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ============================================
+# Logs and Runtime Files
+# ============================================
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ============================================
+# Package Manager Files
+# ============================================
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Python
+venv/
+ENV/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ============================================
+# Generated Documentation
+# ============================================
+# Keep .md files but ignore generated docs
+docs/_build/
+site/
+
+# ============================================
+# Kubernetes Generated Files
+# ============================================
+# Keep manifests but ignore generated ones
+*-generated.yaml
+*.generated.yaml
+
+# Helm charts (if pulling from remote)
+charts/*.tgz
+
+# ============================================
+# Ansible Generated Files
+# ============================================
+*.retry
+.vault-password
+
+# ============================================
+# CI/CD Temporary Files
+# ============================================
+.github/workflows/*.log
+
+# ============================================
+# What TO COMMIT (explicitly allowed)
+# ============================================
+# These are the core IaC files that SHOULD be versioned:
+# - manifests-aws/*.yaml (Kubernetes manifests)
+# - ansible-aws/*.yml (Ansible playbooks)
+# - code/ (Application code and Dockerfiles)
+# - *.md (Documentation)
+# - scripts/*.sh (Automation scripts)
+# - .github/ (CI/CD workflows)
+# - cluster-config.yaml (Cluster definitions)
+# - Dockerfile* (Container definitions)
+
+# ============================================
+# Chapter 4 Principle: "Define Everything as Code"
+# ============================================
+# This .gitignore ensures we version:
+# 1. Infrastructure definitions (manifests, playbooks)
+# 2. Application code (Dockerfiles, source code)
+# 3. Configuration as code (network policies, HPA, etc)
+# 4. Automation scripts (CI/CD, monitoring)
+# 5. Documentation (explaining the "how" and "why")
+#
+# While excluding:
+# - Secrets and credentials
+# - Build artifacts and temporary files
+# - IDE-specific configurations
+# - Runtime logs and state files

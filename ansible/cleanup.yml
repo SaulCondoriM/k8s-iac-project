@@ -1,0 +1,62 @@
+---
+- name: Cleanup Autoscaling Infrastructure
+  hosts: localhost
+  gather_facts: no
+  vars:
+    namespace: default
+    monitoring_namespace: monitoring
+    
+  tasks:
+    - name: Remove Locust deployment
+      command: kubectl delete -f {{ playbook_dir }}/../manifests/locust.yaml
+      register: locust_delete
+      failed_when: 
+        - locust_delete.rc != 0
+        - "'NotFound' not in locust_delete.stderr"
+      changed_when: locust_delete.rc == 0
+      
+    - name: Remove HPA
+      command: kubectl delete -f {{ playbook_dir }}/../manifests/hpa.yaml
+      register: hpa_delete
+      failed_when:
+        - hpa_delete.rc != 0
+        - "'NotFound' not in hpa_delete.stderr"
+      changed_when: hpa_delete.rc == 0
+      
+    - name: Uninstall Prometheus stack
+      command: helm uninstall prometheus -n {{ monitoring_namespace }}
+      register: prometheus_delete
+      failed_when:
+        - prometheus_delete.rc != 0
+        - "'not found' not in prometheus_delete.stderr"
+      changed_when: prometheus_delete.rc == 0
+      
+    - name: Delete monitoring namespace
+      command: kubectl delete namespace {{ monitoring_namespace }}
+      register: ns_delete
+      failed_when:
+        - ns_delete.rc != 0
+        - "'NotFound' not in ns_delete.stderr"
+      changed_when: ns_delete.rc == 0
+      
+    - name: Delete Metrics Server
+      command: kubectl delete -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      register: metrics_delete
+      failed_when:
+        - metrics_delete.rc != 0
+        - "'NotFound' not in metrics_delete.stderr"
+      changed_when: metrics_delete.rc == 0
+      ignore_errors: yes
+      
+    - name: Display cleanup summary
+      debug:
+        msg:
+          - "=== CLEANUP COMPLETE ==="
+          - "Removed resources:"
+          - "  - Locust deployment"
+          - "  - HPA configuration"
+          - "  - Prometheus + Grafana stack"
+          - "  - Monitoring namespace"
+          - "  - Metrics Server"
+          - ""
+          - "Application deployment remains active"

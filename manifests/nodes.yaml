@@ -1,0 +1,30 @@
+
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-pool-autoscaling-config
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler
+data:
+
+  cluster-name: "k8s-autoscaling-demo"
+  region: "nyc1"
+  node-pool-name: "worker-pool"
+  
+  min-nodes: "2"          
+  max-nodes: "10"         
+  
+  node-size: "s-2vcpu-4gb"  
+  
+  scale-down-delay: "10m"           
+  scale-down-unneeded-time: "10m"   
+  scale-up-delay: "0s"            
+
+  balance-similar-node-groups: "true"  
+  expander: "least-waste"          
+  
+
+
+  

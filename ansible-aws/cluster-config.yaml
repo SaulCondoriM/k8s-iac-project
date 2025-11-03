@@ -1,0 +1,61 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: k8s-autoscaling-cluster
+  region: us-east-1
+  version: "1.28"
+
+# VPC Configuration - eksctl creará automáticamente la VPC
+vpc:
+  cidr: 10.0.0.0/16
+  nat:
+    gateway: Single # Usar un solo NAT Gateway para ahorrar costos
+
+# IAM Configuration
+iam:
+  withOIDC: true # Habilitar OIDC provider para IAM roles for service accounts
+
+# Managed Node Group con Autoscaling
+managedNodeGroups:
+  - name: worker-nodes
+    instanceType: t3.small # 2 vCPU, 2GB RAM - Mejor para EKS
+    desiredCapacity: 2
+    minSize: 2
+    maxSize: 5
+    volumeSize: 20 # GB de disco EBS
+    volumeType: gp3
+    labels:
+      role: worker
+      environment: production
+    tags:
+      k8s.io/cluster-autoscaler/enabled: "true"
+      k8s.io/cluster-autoscaler/k8s-autoscaling-cluster: "owned"
+    iam:
+      withAddonPolicies:
+        autoScaler: true # Permite al Cluster Autoscaler gestionar el scaling
+        cloudWatch: true
+        ebs: true
+        efs: true
+        albIngress: true
+    privateNetworking: false # Usar subnets públicas para ahorrar costos de NAT Gateway
+
+# CloudWatch logging
+cloudWatch:
+  clusterLogging:
+    enableTypes:
+      - api
+      - audit
+      - authenticator
+      - controllerManager
+      - scheduler
+    logRetentionInDays: 7
+
+# Addons
+addons:
+  - name: vpc-cni
+    version: latest
+  - name: coredns
+    version: latest
+  - name: kube-proxy
+    version: latest

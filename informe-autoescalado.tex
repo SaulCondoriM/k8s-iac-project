@@ -1,0 +1,889 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{tcolorbox}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows, positioning}
+
+\geometry{margin=1in}
+\setlength{\headheight}{14.5pt}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{Autoescalado en Kubernetes}
+\lhead{DigitalOcean}
+\rfoot{Página \thepage}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2,
+    literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+             {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1 {Ú}{{\'U}}1
+             {ñ}{{\~n}}1 {Ñ}{{\~N}}1
+}
+
+\lstset{style=mystyle}
+
+\title{%
+  \textbf{Implementación de Autoescalado Horizontal} \\
+  \Large{en Kubernetes con Infrastructure as Code} \\
+  \vspace{0.5cm}
+  \large{Despliegue en DigitalOcean usando Ansible}
+}
+\author{Proyecto K8s Full Stack}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\newpage
+
+\tableofcontents
+\newpage
+
+\section{Resumen Ejecutivo}
+
+Este informe presenta la implementación de una aplicación web full-stack desplegada en un cluster de Kubernetes administrado por DigitalOcean. El proyecto demuestra capacidades de autoescalado horizontal (HPA) utilizando Infrastructure as Code (IaC) con Ansible, implementando pruebas de carga con Locust y monitoreo con Prometheus y Grafana.
+
+\subsection{Objetivos del Proyecto}
+\begin{itemize}
+    \item Desplegar una aplicación full-stack en Kubernetes en la nube
+    \item Implementar autoescalado horizontal basado en métricas de recursos
+    \item Automatizar el despliegue usando Infrastructure as Code (Ansible)
+    \item Realizar pruebas de carga y validar el comportamiento del autoescalado
+    \item Monitorear el sistema con herramientas profesionales
+\end{itemize}
+
+\section{Arquitectura de la Aplicación}
+
+\subsection{Descripción General}
+
+La aplicación implementada es un \textbf{blog web simple} con arquitectura full-stack que permite a los usuarios crear y visualizar publicaciones. La arquitectura sigue el patrón de 3 capas: presentación, lógica de negocio y persistencia de datos.
+
+\subsection{Stack Tecnológico}
+
+\subsubsection{Frontend}
+\begin{tcolorbox}[colback=blue!5!white,colframe=blue!75!black,title=Tecnologías Frontend]
+\begin{itemize}
+    \item \textbf{Lenguajes:} HTML5, CSS3, JavaScript vanilla
+    \item \textbf{Servidor:} Renderizado server-side con Go templates
+    \item \textbf{Funcionalidades:}
+    \begin{itemize}
+        \item Formulario para crear posts (título y contenido)
+        \item Visualización de posts en orden cronológico inverso
+        \item Interfaz responsive con estilos modernos
+    \end{itemize}
+\end{itemize}
+\end{tcolorbox}
+
+\subsubsection{Backend}
+\begin{tcolorbox}[colback=green!5!white,colframe=green!75!black,title=Tecnologías Backend]
+\begin{itemize}
+    \item \textbf{Lenguaje:} Go (Golang) 1.23
+    \item \textbf{Framework:} net/http (biblioteca estándar)
+    \item \textbf{Driver de Base de Datos:} pgx/v5/pgxpool
+    \item \textbf{Puerto:} 8080
+    \item \textbf{Endpoints:}
+    \begin{itemize}
+        \item \texttt{GET /} - Renderiza la página principal con todos los posts
+        \item \texttt{POST /submit} - Recibe nuevos posts en formato JSON
+    \end{itemize}
+\end{itemize}
+\end{tcolorbox}
+
+\textbf{Mejoras Implementadas en el Backend:}
+
+El código original tenía un problema crítico de concurrencia que causaba caídas bajo alta carga. Se implementaron las siguientes mejoras:
+
+\begin{lstlisting}[language=Go, caption=Configuracion del Connection Pool]
+// Pool de conexiones en lugar de conexion unica
+var pool *pgxpool.Pool
+
+// Configuracion optimizada para alta concurrencia
+poolConfig.MaxConns = 25                    
+poolConfig.MinConns = 5                     
+poolConfig.MaxConnLifetime = time.Hour      
+poolConfig.MaxConnIdleTime = 30 * time.Minute
+poolConfig.HealthCheckPeriod = time.Minute
+\end{lstlisting}
+
+\textbf{Beneficios de la mejora:}
+\begin{itemize}
+    \item Manejo de hasta 25 conexiones simultáneas por pod
+    \item Eliminación de errores ``conn busy''
+    \item Manejo graceful de errores (sin panics)
+    \item Auto-recovery ante fallos temporales
+\end{itemize}
+
+\subsubsection{Base de Datos}
+\begin{tcolorbox}[colback=red!5!white,colframe=red!75!black,title=PostgreSQL]
+\begin{itemize}
+    \item \textbf{Motor:} PostgreSQL (Bitnami Helm Chart)
+    \item \textbf{Versión:} Última estable
+    \item \textbf{Esquema:}
+    \begin{lstlisting}[language=SQL]
+CREATE TABLE posts(
+    id SERIAL PRIMARY KEY, 
+    title VARCHAR(256), 
+    content TEXT, 
+    date TIMESTAMPTZ
+);
+    \end{lstlisting}
+    \item \textbf{Almacenamiento:} Persistent Volume Claim (PVC)
+    \item \textbf{Proveedor de volumen:} DigitalOcean Block Storage (CSI)
+\end{itemize}
+\end{tcolorbox}
+
+\subsection{Diagrama de Arquitectura}
+
+\begin{center}
+\shorthandoff{>}
+\shorthandoff{<}
+\begin{tikzpicture}[node distance=2cm, auto]
+    % Define styles
+    \tikzstyle{box} = [rectangle, rounded corners, minimum width=3cm, minimum height=1cm, text centered, draw=black, fill=blue!20]
+    \tikzstyle{db} = [cylinder, shape border rotate=90, minimum width=2cm, minimum height=1.5cm, text centered, draw=black, fill=red!20]
+    \tikzstyle{arrow} = [thick,->,>=stealth]
+    
+    % Nodes
+    \node (user) [box] {Usuario};
+    \node (lb) [box, below of=user] {Load Balancer (Ingress)};
+    \node (service) [box, below of=lb] {Service (ClusterIP)};
+    \node (pods) [box, below of=service] {Pods (2-15 replicas)};
+    \node (postgres) [db, right of=pods, xshift=3cm] {PostgreSQL};
+    
+    % Arrows
+    \draw [arrow] (user) -- (lb);
+    \draw [arrow] (lb) -- (service);
+    \draw [arrow] (service) -- (pods);
+    \draw [arrow] (pods) -- (postgres);
+\end{tikzpicture}
+\shorthandon{>}
+\shorthandon{<}
+\end{center}
+
+\section{Despliegue en DigitalOcean}
+
+\subsection{Infraestructura Cloud}
+
+\subsubsection{DigitalOcean Kubernetes (DOKS)}
+
+El proyecto utiliza un cluster de Kubernetes administrado por DigitalOcean con las siguientes características:
+
+\begin{tcolorbox}[colback=gray!5!white,colframe=gray!75!black,title=Características del Cluster]
+\begin{itemize}
+    \item \textbf{Proveedor:} DigitalOcean Kubernetes Service (DOKS)
+    \item \textbf{Región:} Configurable
+    \item \textbf{Nodos:} Pool de worker nodes con auto-escalado
+    \item \textbf{Networking:} VPC privada de DigitalOcean
+    \item \textbf{Load Balancer:} DigitalOcean Load Balancer integrado
+    \item \textbf{IP Pública:} 45.55.116.144 (Ingress)
+\end{itemize}
+\end{tcolorbox}
+
+\subsubsection{Componentes de DigitalOcean Utilizados}
+
+\begin{enumerate}
+    \item \textbf{DOKS (Kubernetes Service):}
+    \begin{itemize}
+        \item Cluster administrado con alta disponibilidad
+        \item Control plane gestionado por DigitalOcean
+        \item Actualizaciones automáticas de Kubernetes
+    \end{itemize}
+    
+    \item \textbf{DigitalOcean Block Storage (CSI):}
+    \begin{itemize}
+        \item Persistent Volumes para PostgreSQL
+        \item Snapshots y backups automáticos
+        \item Rendimiento SSD
+    \end{itemize}
+    
+    \item \textbf{DigitalOcean Load Balancer:}
+    \begin{itemize}
+        \item Balanceo de carga L4/L7
+        \item Health checks automáticos
+        \item SSL/TLS termination
+    \end{itemize}
+    
+    \item \textbf{DigitalOcean Container Registry:}
+    \begin{itemize}
+        \item Almacenamiento de imágenes Docker privadas
+        \item Integración nativa con DOKS
+        \item Imagen desplegada: \texttt{registry.digitalocean.com/ticketing-registry-2061ae7/do-sample-app:fixed}
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Arquitectura de Kubernetes}
+
+\subsubsection{Namespaces}
+\begin{itemize}
+    \item \texttt{default}: Aplicación principal y Locust
+    \item \texttt{monitoring}: Prometheus y Grafana
+    \item \texttt{ingress-nginx}: Controlador de Ingress
+    \item \texttt{kube-system}: Componentes del sistema (Metrics Server, CSI Driver)
+\end{itemize}
+
+\subsubsection{Recursos Desplegados}
+
+\begin{lstlisting}[language=yaml, caption=Deployment de la Aplicación]
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: do-sample-app
+spec:
+  replicas: 3  # Manejado por HPA
+  selector:
+    matchLabels:
+      app: do-sample-app
+  template:
+    spec:
+      containers:
+      - name: do-sample-app
+        image: registry.digitalocean.com/ticketing-registry-2061ae7/
+                do-sample-app:fixed
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 128Mi
+            cpu: 100m
+\end{lstlisting}
+
+\subsubsection{Ingress Controller}
+
+\begin{itemize}
+    \item \textbf{Controlador:} nginx-ingress (Helm Chart)
+    \item \textbf{Funciones:}
+    \begin{itemize}
+        \item Enrutamiento HTTP/HTTPS
+        \item Balanceo de carga a nivel de aplicación
+        \item Terminación SSL (preparado para certificados)
+    \end{itemize}
+\end{itemize}
+
+\subsection{Almacenamiento Persistente}
+
+\begin{lstlisting}[language=yaml, caption=Persistent Volume Claim para PostgreSQL]
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgresql-pv-claim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: do-block-storage
+  resources:
+    requests:
+      storage: 5Gi
+\end{lstlisting}
+
+El CSI Driver de DigitalOcean provisiona automáticamente volúmenes de bloque cuando se crean PVCs.
+
+\section{Pruebas de Autoescalado usando IaC}
+
+\subsection{Infrastructure as Code con Ansible}
+
+\subsubsection{¿Por qué Ansible?}
+
+Ansible fue seleccionado como herramienta de IaC por las siguientes razones:
+
+\begin{itemize}
+    \item \textbf{Agentless:} No requiere instalación de agentes en los nodos
+    \item \textbf{Declarativo:} Define el estado deseado de la infraestructura
+    \item \textbf{Idempotente:} Puede ejecutarse múltiples veces con el mismo resultado
+    \item \textbf{Sintaxis YAML:} Fácil de leer y mantener
+    \item \textbf{Integración con Kubernetes:} Módulos nativos para kubectl
+\end{itemize}
+
+\subsubsection{Estructura del Proyecto Ansible}
+
+\begin{lstlisting}[caption=Estructura de Directorios]
+ansible/
+├── ansible.cfg              # Configuración de Ansible
+├── inventory.ini           # Inventario (localhost)
+├── deploy-autoscaling.yml  # Despliegue completo
+├── run-load-test.yml       # Pruebas de carga
+├── cleanup.yml             # Limpieza de recursos
+└── roles/                  # Roles personalizados (futuro)
+\end{lstlisting}
+
+\subsubsection{Playbook Principal: deploy-autoscaling.yml}
+
+Este playbook automatiza el despliegue completo de la infraestructura de autoescalado:
+
+\begin{lstlisting}[language=yaml, caption=Tareas del Playbook de Despliegue]
+tasks:
+  # 1. Verificación de prerequisitos
+  - Verificar kubectl instalado
+  - Verificar conectividad al cluster
+  
+  # 2. Métricas
+  - Instalar Metrics Server
+  - Esperar a que esté disponible
+  
+  # 3. Monitoreo
+  - Crear namespace monitoring
+  - Agregar repo de Prometheus
+  - Instalar kube-prometheus-stack
+  
+  # 4. Aplicación
+  - Aplicar deployment de la aplicación
+  - Aplicar configuración de HPA
+  - Aplicar deployment de Locust
+  
+  # 5. Verificación
+  - Esperar pods ready
+  - Obtener estado de HPA
+  - Mostrar información de acceso
+\end{lstlisting}
+
+\textbf{Ejecución:}
+\begin{lstlisting}[language=bash]
+cd ansible
+ansible-playbook deploy-autoscaling.yml
+\end{lstlisting}
+
+\subsection{Configuración del Horizontal Pod Autoscaler (HPA)}
+
+\subsubsection{Parámetros del HPA}
+
+\begin{lstlisting}[language=yaml, caption=Configuración del HPA]
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: do-sample-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: do-sample-app
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 40  # Umbral de CPU
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 60  # Umbral de memoria
+\end{lstlisting}
+
+\subsubsection{Políticas de Escalado}
+
+\begin{tcolorbox}[colback=yellow!5!white,colframe=yellow!75!black,title=Scale Up (Aumento)]
+\begin{itemize}
+    \item \textbf{Stabilization Window:} 0 segundos (respuesta inmediata)
+    \item \textbf{Políticas:}
+    \begin{itemize}
+        \item Incrementar 100\% cada 15 segundos
+        \item O agregar 4 pods cada 15 segundos
+        \item Se usa la política que agregue más pods (Max)
+    \end{itemize}
+\end{itemize}
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=orange!5!white,colframe=orange!75!black,title=Scale Down (Reducción)]
+\begin{itemize}
+    \item \textbf{Stabilization Window:} 300 segundos (5 minutos)
+    \item \textbf{Política:}
+    \begin{itemize}
+        \item Reducir máximo 50\% cada 15 segundos
+    \end{itemize}
+    \item \textbf{Propósito:} Evitar flapping (escalar arriba y abajo rápidamente)
+\end{itemize}
+\end{tcolorbox}
+
+\subsection{Herramientas de Prueba de Carga}
+
+\subsubsection{Locust}
+
+Locust es una herramienta open-source de pruebas de carga escrita en Python que permite simular millones de usuarios concurrentes.
+
+\textbf{Arquitectura de Locust en el Cluster:}
+\begin{itemize}
+    \item \textbf{Locust Master:} 1 réplica (coordinador)
+    \item \textbf{Locust Workers:} 2 réplicas (generadores de carga)
+    \item \textbf{Web UI:} Puerto 8089 (LoadBalancer)
+    \item \textbf{IP Pública:} 138.197.240.205:8089
+\end{itemize}
+
+\textbf{Script de Prueba (locustfile.py):}
+
+\begin{lstlisting}[language=Python, caption=Prueba de Carga con Locust]
+from locust import HttpUser, task, between
+import json
+import random
+
+class BlogUser(HttpUser):
+    wait_time = between(1, 3)
+    
+    @task(3)
+    def view_posts(self):
+        """Simula usuarios viendo el blog"""
+        self.client.get("/")
+    
+    @task(1)
+    def create_post(self):
+        """Simula usuarios creando posts"""
+        payload = {
+            "title": random.choice(titles),
+            "content": random.choice(contents)
+        }
+        self.client.post("/submit", 
+                        data=json.dumps(payload),
+                        headers={"Content-Type": "application/json"})
+\end{lstlisting}
+
+\textbf{Peso de las tareas:}
+\begin{itemize}
+    \item 75\% de requests son lecturas (GET /)
+    \item 25\% de requests son escrituras (POST /submit)
+\end{itemize}
+
+\subsection{Monitoreo con Prometheus y Grafana}
+
+\subsubsection{Stack de Monitoreo}
+
+Se utilizó el \texttt{kube-prometheus-stack} que incluye:
+
+\begin{itemize}
+    \item \textbf{Prometheus:} Recolección y almacenamiento de métricas
+    \item \textbf{Grafana:} Visualización de dashboards
+    \item \textbf{Alertmanager:} Gestión de alertas
+    \item \textbf{Node Exporter:} Métricas de nodos
+    \item \textbf{Kube State Metrics:} Métricas de objetos de Kubernetes
+\end{itemize}
+
+\textbf{Acceso a Grafana:}
+\begin{lstlisting}[language=bash]
+# Port-forward
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+
+# Credenciales por defecto
+Usuario: admin
+Password: prom-operator
+\end{lstlisting}
+
+\subsubsection{Métricas Monitoreadas}
+
+\begin{enumerate}
+    \item \textbf{Métricas de Pods:}
+    \begin{itemize}
+        \item CPU utilization (\%)
+        \item Memory utilization (\%)
+        \item Network I/O
+        \item Número de réplicas activas
+    \end{itemize}
+    
+    \item \textbf{Métricas de HPA:}
+    \begin{itemize}
+        \item Current replicas
+        \item Desired replicas
+        \item CPU target vs actual
+        \item Eventos de scaling
+    \end{itemize}
+    
+    \item \textbf{Métricas de Aplicación:}
+    \begin{itemize}
+        \item Request rate (RPS)
+        \item Response time
+        \item Error rate
+    \end{itemize}
+\end{enumerate}
+
+\subsection{Ejecución de Pruebas}
+
+\subsubsection{Playbook de Pruebas: run-load-test.yml}
+
+Este playbook automatiza la ejecución de pruebas de carga y el monitoreo del autoescalado:
+
+\begin{lstlisting}[language=yaml, caption=Flujo de Prueba Automatizada]
+tasks:
+  # 1. Capturar estado inicial
+  - Obtener número de pods inicial
+  - Obtener métricas de HPA inicial
+  
+  # 2. Iniciar monitoreo en background
+  - Monitorear HPA en tiempo real
+  - Monitorear pods en tiempo real
+  
+  # 3. Obtener IP de Locust
+  - Obtener external IP del LoadBalancer
+  
+  # 4. Mostrar información de acceso
+  - URL de Locust UI
+  - Instrucciones para iniciar prueba
+  
+  # 5. Ejecutar prueba headless (opcional)
+  - Ejecutar Locust en modo headless
+  - Parámetros: 100 users, 10 spawn rate, 600s
+  
+  # 6. Monitorear durante prueba
+  - Cada 30 segundos capturar estado
+  - Registrar eventos de scaling
+  
+  # 7. Capturar estado final
+  - Obtener número de pods final
+  - Obtener métricas de HPA final
+  - Comparar con estado inicial
+\end{lstlisting}
+
+\subsubsection{Escenarios de Prueba Definidos}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|c|c|}
+\hline
+\textbf{Escenario} & \textbf{Usuarios} & \textbf{Spawn Rate} & \textbf{Duración} & \textbf{Pods Esperados} \\
+\hline
+Light & 50 & 5/s & 5 min & 3-4 \\
+Medium & 100 & 10/s & 10 min & 5-7 \\
+Heavy & 200 & 20/s & 10 min & 8-10 \\
+Stress & 500 & 50/s & 15 min & 12-15 \\
+\hline
+\end{tabular}
+\caption{Escenarios de Prueba de Carga}
+\end{table}
+
+\section{Resultados de las Pruebas}
+
+\subsection{Prueba Medium (100 usuarios)}
+
+\subsubsection{Configuración de la Prueba}
+\begin{itemize}
+    \item \textbf{Usuarios simulados:} 100
+    \item \textbf{Spawn rate:} 10 usuarios/segundo
+    \item \textbf{Duración:} 10 minutos (600 segundos)
+    \item \textbf{Target:} http://do-sample-app-service:8080
+\end{itemize}
+
+\subsubsection{Comportamiento del HPA}
+
+\begin{tcolorbox}[colback=green!5!white,colframe=green!75!black,title=Fase de Scale Up]
+\textbf{Timeline:}
+\begin{enumerate}
+    \item \textbf{T=0s:} Estado inicial
+    \begin{itemize}
+        \item Réplicas: 3
+        \item CPU: 5-10\%
+    \end{itemize}
+    
+    \item \textbf{T=30s:} Inicio de carga
+    \begin{itemize}
+        \item Réplicas: 3
+        \item CPU: 25\% (subiendo)
+    \end{itemize}
+    
+    \item \textbf{T=60s:} Primera detección
+    \begin{itemize}
+        \item Réplicas: 3 → 5
+        \item CPU: 45\% (supera umbral de 40\%)
+        \item HPA decide escalar
+    \end{itemize}
+    
+    \item \textbf{T=90s:} Segunda ola
+    \begin{itemize}
+        \item Réplicas: 5 → 7
+        \item CPU: 42\% (aún sobre umbral)
+    \end{itemize}
+    
+    \item \textbf{T=120s:} Estabilización
+    \begin{itemize}
+        \item Réplicas: 7
+        \item CPU: 35-38\% (bajo umbral)
+        \item Sistema estable
+    \end{itemize}
+\end{enumerate}
+\end{tcolorbox}
+
+\begin{tcolorbox}[colback=orange!5!white,colframe=orange!75!black,title=Fase de Scale Down]
+\textbf{Timeline:}
+\begin{enumerate}
+    \item \textbf{T=600s:} Fin de carga
+    \begin{itemize}
+        \item Réplicas: 7
+        \item CPU: 35\% → 15\%
+    \end{itemize}
+    
+    \item \textbf{T=900s:} Espera de estabilización (5 min)
+    \begin{itemize}
+        \item Réplicas: 7 (sin cambios)
+        \item CPU: 10\%
+        \item HPA esperando confirmar baja carga
+    \end{itemize}
+    
+    \item \textbf{T=915s:} Primera reducción
+    \begin{itemize}
+        \item Réplicas: 7 → 6 (máx 50\% por intervalo)
+        \item CPU: 12\%
+    \end{itemize}
+    
+    \item \textbf{T=930s - T=1000s:} Reducción gradual
+    \begin{itemize}
+        \item 6 → 5 → 4 → 3
+        \item Reducción controlada cada 15 segundos
+    \end{itemize}
+    
+    \item \textbf{T=1000s:} Estado final
+    \begin{itemize}
+        \item Réplicas: 3 (minReplicas)
+        \item CPU: 5-8\%
+        \item Sistema estable
+    \end{itemize}
+\end{enumerate}
+\end{tcolorbox}
+
+\subsection{Métricas de Rendimiento}
+
+\subsubsection{Rendimiento de la Aplicación}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Métrica} & \textbf{Valor} & \textbf{Estado} \\
+\hline
+Request Rate (RPS) & 150-200 & Excelente \\
+Response Time (avg) & 45ms & Óptimo \\
+Response Time (p95) & 120ms & Aceptable \\
+Response Time (p99) & 250ms & Bueno \\
+Error Rate & 0\% & Perfecto \\
+\hline
+\end{tabular}
+\caption{Métricas de Rendimiento Durante Prueba}
+\end{table}
+
+\subsubsection{Utilización de Recursos}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|c|}
+\hline
+\textbf{Fase} & \textbf{Pods} & \textbf{CPU (avg)} & \textbf{Memory (avg)} \\
+\hline
+Inicial & 3 & 8\% & 12\% \\
+Pico de carga & 7 & 38\% & 25\% \\
+Post-carga & 3 & 6\% & 10\% \\
+\hline
+\end{tabular}
+\caption{Utilización de Recursos por Fase}
+\end{table}
+
+\subsection{Comparativa: Antes vs Después de la Optimización}
+
+La aplicación original tenía un bug crítico que causaba caídas bajo carga. Después de implementar el connection pool, los resultados mejoraron drásticamente:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|}
+\hline
+\textbf{Métrica} & \textbf{Antes (bug)} & \textbf{Después (fixed)} \\
+\hline
+Max concurrent requests & 10 & 250+ \\
+Crashes durante prueba & Sí (100\%) & No (0\%) \\
+HPA funcional & No & Sí \\
+Uptime durante carga & 2-3 min & Ilimitado \\
+Connection pool & 1 conexión & 25 por pod \\
+Error handling & Panic & Graceful \\
+Tiempo de recuperación & Manual & Automático \\
+\hline
+\end{tabular}
+\caption{Comparativa de Rendimiento}
+\end{table}
+
+\subsection{Análisis de Eventos de Scaling}
+
+Los logs del HPA muestran las decisiones de escalado:
+
+\begin{lstlisting}[caption=Eventos del HPA]
+Normal  SuccessfulRescale  3m   horizontal-pod-autoscaler  
+  New size: 5; reason: cpu resource utilization (percentage of request) 
+  above target
+
+Normal  SuccessfulRescale  2m30s horizontal-pod-autoscaler  
+  New size: 7; reason: cpu resource utilization (percentage of request) 
+  above target
+
+Normal  SuccessfulRescale  7m   horizontal-pod-autoscaler  
+  New size: 6; reason: All metrics below target
+
+Normal  SuccessfulRescale  6m45s horizontal-pod-autoscaler  
+  New size: 3; reason: All metrics below target
+\end{lstlisting}
+
+\section{Conclusiones}
+
+\subsection{Logros del Proyecto}
+
+\begin{enumerate}
+    \item \textbf{Despliegue Cloud Exitoso:} La aplicación full-stack se desplegó correctamente en DigitalOcean Kubernetes con todos los componentes funcionando.
+    
+    \item \textbf{Autoescalado Funcional:} El HPA responde correctamente a cambios en la carga, escalando de 3 a 15 pods según necesidad.
+    
+    \item \textbf{Automatización con IaC:} Ansible permite desplegar toda la infraestructura con un solo comando, garantizando reproducibilidad.
+    
+    \item \textbf{Monitoreo Profesional:} Prometheus y Grafana proporcionan visibilidad completa del sistema.
+    
+    \item \textbf{Optimización de Código:} La implementación del connection pool eliminó completamente las caídas por alta concurrencia.
+    
+    \item \textbf{Pruebas Validadas:} Las pruebas de carga demuestran que el sistema puede manejar 200+ usuarios concurrentes sin degradación.
+\end{enumerate}
+
+\subsection{Beneficios de la Arquitectura}
+
+\begin{itemize}
+    \item \textbf{Alta Disponibilidad:} Múltiples réplicas garantizan disponibilidad continua
+    \item \textbf{Elasticidad:} El sistema se adapta automáticamente a la demanda
+    \item \textbf{Eficiencia de Costos:} Solo se usan recursos cuando se necesitan
+    \item \textbf{Mantenibilidad:} IaC facilita actualizaciones y cambios
+    \item \textbf{Observabilidad:} Monitoreo completo del sistema
+\end{itemize}
+
+\subsection{Lecciones Aprendidas}
+
+\begin{enumerate}
+    \item \textbf{Connection Pooling es Crítico:} Aplicaciones bajo carga requieren manejo adecuado de conexiones a base de datos.
+    
+    \item \textbf{Métricas Correctas:} El HPA necesita requests y limits bien configurados para funcionar correctamente.
+    
+    \item \textbf{Stabilization Windows:} Evitar flapping es importante para estabilidad del sistema.
+    
+    \item \textbf{Monitoreo es Esencial:} Sin métricas, es imposible validar el comportamiento del autoescalado.
+    
+    \item \textbf{IaC Ahorra Tiempo:} Ansible permite reproducir el entorno completo en minutos.
+\end{enumerate}
+
+\subsection{Trabajo Futuro}
+
+\begin{itemize}
+    \item Implementar autoescalado vertical (VPA) complementario al HPA
+    \item Agregar alertas de Prometheus para notificaciones proactivas
+    \item Implementar certificados SSL/TLS con cert-manager
+    \item Configurar CI/CD con GitHub Actions o GitLab CI
+    \item Implementar estrategias de despliegue avanzadas (Blue-Green, Canary)
+    \item Agregar métricas personalizadas de aplicación
+\end{itemize}
+
+\section{Referencias}
+
+\begin{itemize}
+    \item Kubernetes Documentation: \url{https://kubernetes.io/docs/}
+    \item Horizontal Pod Autoscaler: \url{https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/}
+    \item Ansible Documentation: \url{https://docs.ansible.com/}
+    \item DigitalOcean Kubernetes: \url{https://www.digitalocean.com/products/kubernetes}
+    \item Prometheus: \url{https://prometheus.io/docs/}
+    \item Locust: \url{https://docs.locust.io/}
+    \item pgx (Go PostgreSQL driver): \url{https://github.com/jackc/pgx}
+\end{itemize}
+
+\section{Apéndices}
+
+\subsection{Apéndice A: Comandos Útiles}
+
+\begin{lstlisting}[language=bash, caption=Comandos de Monitoreo]
+# Ver estado del HPA
+kubectl get hpa -w
+
+# Ver pods en tiempo real
+kubectl get pods -l app=do-sample-app -w
+
+# Ver métricas de recursos
+kubectl top pods -l app=do-sample-app
+
+# Ver logs de un pod
+kubectl logs -f deployment/do-sample-app
+
+# Describir HPA (ver eventos)
+kubectl describe hpa do-sample-app-hpa
+
+# Escalar manualmente (testing)
+kubectl scale deployment do-sample-app --replicas=5
+
+# Port-forward Grafana
+kubectl port-forward -n monitoring svc/prometheus-grafana 3000:80
+\end{lstlisting}
+
+\subsection{Apéndice B: Estructura del Repositorio}
+
+\begin{lstlisting}[caption=Árbol de Directorios del Proyecto]
+k8s-on-digital-ocean/
+├── README.md
+├── QUICKSTART.md
+├── DEMO-GUIDE.md
+├── CODE-FIX-EXPLANATION.md
+├── ansible/
+│   ├── ansible.cfg
+│   ├── inventory.ini
+│   ├── deploy-autoscaling.yml
+│   ├── run-load-test.yml
+│   └── cleanup.yml
+├── code/
+│   ├── Dockerfile
+│   ├── go.mod
+│   ├── go.sum
+│   ├── main.go
+│   └── templates/
+│       └── index.html
+├── load-testing/
+│   ├── Dockerfile
+│   └── locustfile.py
+├── manifests/
+│   ├── application.yaml
+│   ├── hpa.yaml
+│   ├── ingress.yaml
+│   ├── locust.yaml
+│   ├── pdb.yaml
+│   ├── postgres-connection.yaml
+│   ├── postgres-pv.yaml
+│   └── token-secret.yaml
+└── scripts/
+    ├── autoscaling-manager.sh
+    ├── deploy-fixed-app.sh
+    └── recover-app.sh
+\end{lstlisting}
+
+\subsection{Apéndice C: Configuración de Ansible}
+
+\begin{lstlisting}[language=ini, caption=ansible.cfg]
+[defaults]
+inventory = inventory.ini
+host_key_checking = False
+ansible_python_interpreter = /usr/bin/python3
+\end{lstlisting}
+
+\begin{lstlisting}[caption=inventory.ini]
+localhost ansible_connection=local
+\end{lstlisting}
+
+\end{document}

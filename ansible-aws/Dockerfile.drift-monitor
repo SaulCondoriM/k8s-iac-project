@@ -1,0 +1,46 @@
+# Dockerfile for Anti-Drift Monitor
+# Implements Chapter 2: Principles of Cloud Age Infrastructure
+# "Schedule an hourly process that continuously applies the code to those servers"
+
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/
+
+# Install AWS CLI
+RUN pip install --no-cache-dir awscli
+
+# Install Ansible and required collections
+RUN pip install --no-cache-dir \
+    ansible==9.0.1 \
+    boto3 \
+    botocore \
+    kubernetes
+
+# Create working directory
+WORKDIR /ansible
+
+# Copy ansible configuration and playbooks
+COPY ansible.cfg /ansible/
+COPY inventory.ini /ansible/
+COPY roles/ /ansible/roles/
+COPY *.yml /ansible/
+
+# Create drift detection script
+COPY drift-check.sh /usr/local/bin/drift-check.sh
+RUN chmod +x /usr/local/bin/drift-check.sh
+
+# Set environment variables
+ENV ANSIBLE_HOST_KEY_CHECKING=False
+ENV ANSIBLE_STDOUT_CALLBACK=yaml
+
+CMD ["/usr/local/bin/drift-check.sh"]

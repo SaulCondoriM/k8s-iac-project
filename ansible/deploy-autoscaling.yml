@@ -1,0 +1,140 @@
+---
+- name: Deploy and Configure K8s Autoscaling Infrastructure
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    namespace: default
+    monitoring_namespace: monitoring
+    manifests_dir: "{{ playbook_dir }}/../manifests"
+    
+  tasks:
+    - name: Ensure kubectl is installed
+      command: kubectl version --client
+      register: kubectl_version
+      changed_when: false
+      
+    - name: Display kubectl version
+      debug:
+        msg: "Kubectl version: {{ kubectl_version.stdout }}"
+    
+    - name: Check if cluster is accessible
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      
+    - name: Display cluster info
+      debug:
+        msg: "Cluster is accessible"
+    
+    - name: Install Metrics Server
+      command: kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      register: metrics_result
+      changed_when: "'created' in metrics_result.stdout or 'configured' in metrics_result.stdout"
+      
+    - name: Wait for Metrics Server to be ready
+      command: kubectl wait --for=condition=available --timeout=120s deployment/metrics-server -n kube-system
+      changed_when: false
+      
+    - name: Create monitoring namespace
+      command: kubectl create namespace {{ monitoring_namespace }}
+      register: ns_result
+      failed_when: 
+        - ns_result.rc != 0
+        - "'AlreadyExists' not in ns_result.stderr"
+      changed_when: ns_result.rc == 0
+      
+    - name: Add Prometheus Helm repo
+      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      register: helm_repo
+      failed_when:
+        - helm_repo.rc != 0
+        - "'already exists' not in helm_repo.stdout"
+      changed_when: "'already exists' not in helm_repo.stdout"
+      
+    - name: Update Helm repos
+      command: helm repo update
+      changed_when: false
+      
+    - name: Install Prometheus stack
+      command: >
+        helm upgrade --install prometheus prometheus-community/kube-prometheus-stack
+        -n {{ monitoring_namespace }}
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+      register: prometheus_install
+      changed_when: "'has been upgraded' in prometheus_install.stdout or 'has been installed' in prometheus_install.stdout"
+      
+    - name: Wait for Prometheus pods to be ready
+      command: kubectl wait --for=condition=ready --timeout=180s pods -l app.kubernetes.io/name=prometheus -n {{ monitoring_namespace }}
+      changed_when: false
+      
+    - name: Apply application deployment
+      command: kubectl apply -f {{ manifests_dir }}/application.yaml
+      register: app_result
+      changed_when: "'created' in app_result.stdout or 'configured' in app_result.stdout"
+      
+    - name: Apply HPA configuration
+      command: kubectl apply -f {{ manifests_dir }}/hpa.yaml
+      register: hpa_result
+      changed_when: "'created' in hpa_result.stdout or 'configured' in hpa_result.stdout"
+      
+    - name: Apply Locust deployment
+      command: kubectl apply -f {{ manifests_dir }}/locust.yaml
+      register: locust_result
+      changed_when: "'created' in locust_result.stdout or 'configured' in locust_result.stdout"
+      
+    - name: Wait for application pods to be ready
+      command: kubectl wait --for=condition=ready --timeout=120s pods -l app=do-sample-app -n {{ namespace }}
+      changed_when: false
+      
+    - name: Wait for Locust master to be ready
+      command: kubectl wait --for=condition=ready --timeout=120s pods -l app=locust-master -n {{ namespace }}
+      changed_when: false
+      
+    - name: Get HPA status
+      command: kubectl get hpa do-sample-app-hpa -n {{ namespace }}
+      register: hpa_status
+      changed_when: false
+      
+    - name: Display HPA status
+      debug:
+        msg: "{{ hpa_status.stdout_lines }}"
+        
+    - name: Get all pods status
+      command: kubectl get pods --all-namespaces
+      register: all_pods
+      changed_when: false
+      
+    - name: Display pods status
+      debug:
+        msg: "{{ all_pods.stdout_lines }}"
+        
+    - name: Get Locust service details
+      command: kubectl get svc locust-master-service -n {{ namespace }}
+      register: locust_svc
+      changed_when: false
+      
+    - name: Display Locust service
+      debug:
+        msg: "{{ locust_svc.stdout_lines }}"
+        
+    - name: Get Grafana admin password
+      shell: kubectl get secret prometheus-grafana -n {{ monitoring_namespace }} -o jsonpath="{.data.admin-password}" | base64 -d
+      register: grafana_password
+      changed_when: false
+      
+    - name: Display access information
+      debug:
+        msg:
+          - "=== DEPLOYMENT COMPLETE ==="
+          - "Grafana admin password: {{ grafana_password.stdout }}"
+          - ""
+          - "To access Grafana locally:"
+          - "kubectl port-forward -n {{ monitoring_namespace }} svc/prometheus-grafana 3000:80"
+          - "Then visit: http://localhost:3000 (admin/{{ grafana_password.stdout }})"
+          - ""
+          - "To access Locust UI:"
+          - "Get external IP with: kubectl get svc locust-master-service"
+          - "Or use port-forward: kubectl port-forward svc/locust-master-service 8089:8089"
+          - ""
+          - "To monitor HPA:"
+          - "kubectl get hpa -w"

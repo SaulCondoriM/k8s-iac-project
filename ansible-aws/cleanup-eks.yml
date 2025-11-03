@@ -1,0 +1,75 @@
+---
+- name: Cleanup AWS EKS Autoscaling Infrastructure
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  
+  vars:
+    cluster_name: k8s-autoscaling-cluster
+    region: us-east-1
+    namespace: default
+    monitoring_namespace: monitoring
+    manifests_dir: "../manifests-aws"
+    
+  tasks:
+    - name: Display cleanup information
+      debug:
+        msg:
+          - "=== Starting AWS EKS Cleanup ==="
+          - "Cluster Name: {{ cluster_name }}"
+          - "This will remove all autoscaling components but keep the cluster"
+          - ""
+    
+    - name: Delete Locust deployment
+      command: kubectl delete -f {{ manifests_dir }}/locust.yaml
+      register: locust_delete
+      changed_when: "'deleted' in locust_delete.stdout"
+      failed_when: false
+      
+    - name: Delete HPA
+      command: kubectl delete -f {{ manifests_dir }}/hpa.yaml
+      register: hpa_delete
+      changed_when: "'deleted' in hpa_delete.stdout"
+      failed_when: false
+      
+    - name: Delete application
+      command: kubectl delete -f {{ manifests_dir }}/application.yaml
+      register: app_delete
+      changed_when: "'deleted' in app_delete.stdout"
+      failed_when: false
+      
+    - name: Delete Cluster Autoscaler
+      command: kubectl delete -f {{ manifests_dir }}/cluster-autoscaler.yaml
+      register: ca_delete
+      changed_when: "'deleted' in ca_delete.stdout"
+      failed_when: false
+      
+    - name: Uninstall Prometheus stack
+      command: helm uninstall prometheus -n {{ monitoring_namespace }}
+      register: prometheus_delete
+      changed_when: "'uninstalled' in prometheus_delete.stdout"
+      failed_when: false
+      
+    - name: Delete monitoring namespace
+      command: kubectl delete namespace {{ monitoring_namespace }}
+      register: ns_delete
+      changed_when: "'deleted' in ns_delete.stdout"
+      failed_when: false
+      
+    - name: Delete Metrics Server
+      command: kubectl delete -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      register: metrics_delete
+      changed_when: "'deleted' in metrics_delete.stdout"
+      failed_when: false
+      
+    - name: Display cleanup status
+      debug:
+        msg:
+          - "=== CLEANUP COMPLETE ==="
+          - ""
+          - "✅ All autoscaling components removed"
+          - ""
+          - "ℹ️  The EKS cluster is still running"
+          - "   To completely delete the cluster, run:"
+          - "   eksctl delete cluster --name {{ cluster_name }} --region {{ region }}"
+          - ""

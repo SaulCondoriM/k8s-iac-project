@@ -1,0 +1,335 @@
+---
+- name: Deploy and Configure K8s Autoscaling Infrastructure on AWS EKS
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars:
+    cluster_name: k8s-autoscaling-cluster
+    region: us-east-1
+    namespace: default
+    monitoring_namespace: monitoring
+    manifests_dir: "../manifests-aws"
+    aws_account_id: "978848629209"
+    
+  tasks:
+    - name: Display deployment information
+      debug:
+        msg:
+          - "=== Starting AWS EKS Deployment ==="
+          - "Cluster Name: {{ cluster_name }}"
+          - "Region: {{ region }}"
+          - "AWS Account: {{ aws_account_id }}"
+          - ""
+    
+    - name: Ensure kubectl is installed
+      command: kubectl version --client
+      register: kubectl_version
+      changed_when: false
+      
+    - name: Display kubectl version
+      debug:
+        msg: "Kubectl version: {{ kubectl_version.stdout }}"
+    
+    - name: Check if cluster exists and is accessible
+      shell: kubectl cluster-info 2>&1
+      register: cluster_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Display cluster status
+      debug:
+        msg: "{{ 'Cluster is accessible' if cluster_check.rc == 0 else 'Cluster not accessible - will need to be created first' }}"
+    
+    - name: Install AWS EBS CSI Driver addon via eksctl
+      command: >
+        eksctl create addon
+        --name aws-ebs-csi-driver
+        --cluster {{ cluster_name }}
+        --region {{ region }}
+        --service-account-role-arn arn:aws:iam::{{ aws_account_id }}:role/AmazonEKS_EBS_CSI_DriverRole
+        --force
+      register: ebs_addon
+      failed_when: false
+      changed_when: "'created' in ebs_addon.stdout"
+    
+    - name: Wait for EBS CSI Driver to be ready
+      command: kubectl wait --for=condition=available --timeout=120s deployment/ebs-csi-controller -n kube-system
+      failed_when: false
+      changed_when: false
+    
+    - name: Apply Storage Class for EBS GP3
+      command: kubectl apply -f {{ manifests_dir }}/storage-class.yaml
+      register: storage_result
+      changed_when: "'created' in storage_result.stdout or 'configured' in storage_result.stdout"
+    
+    - name: Install Metrics Server
+      command: kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+      register: metrics_result
+      changed_when: "'created' in metrics_result.stdout or 'configured' in metrics_result.stdout"
+      
+    - name: Wait for Metrics Server to be ready
+      command: kubectl wait --for=condition=available --timeout=180s deployment/metrics-server -n kube-system
+      changed_when: false
+      
+    - name: Create IAM policy for Cluster Autoscaler
+      shell: |
+        cat > /tmp/cluster-autoscaler-policy.json <<EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "autoscaling:DescribeAutoScalingGroups",
+                "autoscaling:DescribeAutoScalingInstances",
+                "autoscaling:DescribeLaunchConfigurations",
+                "autoscaling:DescribeScalingActivities",
+                "autoscaling:DescribeTags",
+                "ec2:DescribeImages",
+                "ec2:DescribeInstanceTypes",
+                "ec2:DescribeLaunchTemplateVersions",
+                "ec2:GetInstanceTypesFromInstanceRequirements",
+                "eks:DescribeNodegroup"
+              ],
+              "Resource": ["*"]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "autoscaling:SetDesiredCapacity",
+                "autoscaling:TerminateInstanceInAutoScalingGroup"
+              ],
+              "Resource": ["*"]
+            }
+          ]
+        }
+        EOF
+        
+        aws iam create-policy \
+          --policy-name AmazonEKSClusterAutoscalerPolicy \
+          --policy-document file:///tmp/cluster-autoscaler-policy.json 2>&1 || echo "Policy may already exist"
+      register: iam_policy_result
+      changed_when: "'已创建' in iam_policy_result.stdout or 'created' in iam_policy_result.stdout"
+      failed_when: false
+    
+    - name: Create IAM role for Cluster Autoscaler service account
+      shell: |
+        eksctl create iamserviceaccount \
+          --cluster={{ cluster_name }} \
+          --namespace=kube-system \
+          --name=cluster-autoscaler \
+          --attach-policy-arn=arn:aws:iam::{{ aws_account_id }}:policy/AmazonEKSClusterAutoscalerPolicy \
+          --override-existing-serviceaccounts \
+          --region={{ region }} \
+          --approve 2>&1 || echo "Service account may already exist"
+      register: sa_result
+      changed_when: "'created' in sa_result.stdout"
+      failed_when: false
+    
+    - name: Apply Cluster Autoscaler
+      command: kubectl apply -f {{ manifests_dir }}/cluster-autoscaler.yaml
+      register: ca_result
+      changed_when: "'created' in ca_result.stdout or 'configured' in ca_result.stdout"
+      
+    - name: Wait for Cluster Autoscaler to be ready
+      command: kubectl wait --for=condition=available --timeout=120s deployment/cluster-autoscaler -n kube-system
+      changed_when: false
+      failed_when: false
+      
+    - name: Create monitoring namespace
+      command: kubectl create namespace {{ monitoring_namespace }}
+      register: ns_result
+      failed_when: 
+        - ns_result.rc != 0
+        - "'AlreadyExists' not in ns_result.stderr"
+      changed_when: ns_result.rc == 0
+      
+    - name: Add Prometheus Helm repo
+      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      register: helm_repo
+      failed_when:
+        - helm_repo.rc != 0
+        - "'already exists' not in helm_repo.stdout"
+      changed_when: "'already exists' not in helm_repo.stdout"
+      
+    - name: Update Helm repos
+      command: helm repo update
+      changed_when: false
+      
+    - name: Install Prometheus stack
+      command: >
+        helm upgrade --install prometheus prometheus-community/kube-prometheus-stack
+        -n {{ monitoring_namespace }}
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+        --set grafana.service.type=LoadBalancer
+      register: prometheus_install
+      changed_when: "'has been upgraded' in prometheus_install.stdout or 'has been installed' in prometheus_install.stdout"
+      
+    - name: Wait for Prometheus pods to be ready
+      command: kubectl wait --for=condition=ready --timeout=300s pods -l app.kubernetes.io/name=prometheus -n {{ monitoring_namespace }}
+      changed_when: false
+      
+    - name: Apply PostgreSQL PV
+      command: kubectl apply -f {{ manifests_dir }}/postgres-pv.yaml
+      register: pv_result
+      changed_when: "'created' in pv_result.stdout or 'configured' in pv_result.stdout"
+      
+    - name: Apply PostgreSQL connection secret
+      command: kubectl apply -f {{ manifests_dir }}/postgres-connection.yaml
+      register: secret_result
+      changed_when: "'created' in secret_result.stdout or 'configured' in secret_result.stdout"
+      
+    - name: Check if PostgreSQL is already installed
+      command: helm list -n {{ namespace }} -o json
+      register: helm_list
+      changed_when: false
+      
+    - name: Install PostgreSQL with Helm
+      command: >
+        helm install postgresdb bitnami/postgresql
+        --set persistence.existingClaim=postgresql-pv-claim
+        --set auth.username=postgres
+        --set auth.password=W26JgAYApi
+        --set auth.database=postgres
+        --set primary.resources.requests.memory=256Mi
+        --set primary.resources.requests.cpu=100m
+        --set primary.resources.limits.memory=512Mi
+        --set primary.resources.limits.cpu=200m
+        -n {{ namespace }}
+      when: "'postgresdb' not in helm_list.stdout"
+      register: postgres_install
+      changed_when: true
+      
+    - name: Wait for PostgreSQL to be ready
+      command: kubectl wait --for=condition=ready --timeout=180s pods -l app.kubernetes.io/name=postgresql -n {{ namespace }}
+      changed_when: false
+      
+    - name: Apply application deployment
+      command: kubectl apply -f {{ manifests_dir }}/application.yaml
+      register: app_result
+      changed_when: "'created' in app_result.stdout or 'configured' in app_result.stdout"
+      
+    - name: Apply HPA configuration
+      command: kubectl apply -f {{ manifests_dir }}/hpa.yaml
+      register: hpa_result
+      changed_when: "'created' in hpa_result.stdout or 'configured' in hpa_result.stdout"
+      
+    - name: Apply Locust deployment
+      command: kubectl apply -f {{ manifests_dir }}/locust.yaml
+      register: locust_result
+      changed_when: "'created' in locust_result.stdout or 'configured' in locust_result.stdout"
+      
+    - name: Wait for application pods to be ready
+      command: kubectl wait --for=condition=ready --timeout=180s pods -l app=do-sample-app -n {{ namespace }}
+      changed_when: false
+      
+    - name: Wait for Locust master to be ready
+      command: kubectl wait --for=condition=ready --timeout=180s pods -l app=locust-master -n {{ namespace }}
+      changed_when: false
+      
+    - name: Get Cluster Autoscaler status
+      command: kubectl get deployment cluster-autoscaler -n kube-system
+      register: ca_status
+      changed_when: false
+      
+    - name: Display Cluster Autoscaler status
+      debug:
+        msg: "{{ ca_status.stdout_lines }}"
+        
+    - name: Get HPA status
+      command: kubectl get hpa do-sample-app-hpa -n {{ namespace }}
+      register: hpa_status
+      changed_when: false
+      
+    - name: Display HPA status
+      debug:
+        msg: "{{ hpa_status.stdout_lines }}"
+        
+    - name: Get all pods status
+      command: kubectl get pods --all-namespaces
+      register: all_pods
+      changed_when: false
+      
+    - name: Display pods status
+      debug:
+        msg: "{{ all_pods.stdout_lines }}"
+        
+    - name: Get EC2 instances (nodes)
+      shell: kubectl get nodes -o wide
+      register: nodes_info
+      changed_when: false
+      
+    - name: Display nodes information
+      debug:
+        msg: "{{ nodes_info.stdout_lines }}"
+        
+    - name: Get application LoadBalancer URL
+      shell: |
+        kubectl get svc do-sample-app-service -n {{ namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Pending..."
+      register: app_url
+      changed_when: false
+      retries: 10
+      delay: 10
+      until: app_url.stdout != "Pending..."
+      
+    - name: Get Locust LoadBalancer URL
+      shell: |
+        kubectl get svc locust-master-service -n {{ namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Pending..."
+      register: locust_url
+      changed_when: false
+      retries: 10
+      delay: 10
+      until: locust_url.stdout != "Pending..."
+      
+    - name: Get Grafana LoadBalancer URL
+      shell: |
+        kubectl get svc prometheus-grafana -n {{ monitoring_namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Pending..."
+      register: grafana_url
+      changed_when: false
+      retries: 10
+      delay: 10
+      until: grafana_url.stdout != "Pending..."
+      
+    - name: Get Grafana admin password
+      shell: kubectl get secret prometheus-grafana -n {{ monitoring_namespace }} -o jsonpath="{.data.admin-password}" | base64 -d
+      register: grafana_password
+      changed_when: false
+      
+    - name: Display access information
+      debug:
+        msg:
+          - "=== DEPLOYMENT COMPLETE ==="
+          - ""
+          - "🎉 AWS EKS Cluster deployed successfully!"
+          - ""
+          - "📊 Application URL:"
+          - "   http://{{ app_url.stdout }}"
+          - ""
+          - "🔥 Locust Load Testing UI:"
+          - "   http://{{ locust_url.stdout }}:8089"
+          - ""
+          - "📈 Grafana Dashboard:"
+          - "   http://{{ grafana_url.stdout }}"
+          - "   Username: admin"
+          - "   Password: {{ grafana_password.stdout }}"
+          - ""
+          - "⚙️  Cluster Autoscaler Configuration:"
+          - "   Min Nodes: 2"
+          - "   Max Nodes: 5"
+          - "   Instance Type: t3.medium"
+          - ""
+          - "🚀 HPA Configuration:"
+          - "   Min Pods: 2"
+          - "   Max Pods: 10"
+          - "   CPU Target: 50%"
+          - "   Memory Target: 70%"
+          - ""
+          - "📋 Useful commands:"
+          - "   Watch HPA: kubectl get hpa -w"
+          - "   Watch Pods: kubectl get pods -w"
+          - "   Watch Nodes: kubectl get nodes -w"
+          - "   Cluster Autoscaler logs: kubectl logs -f deployment/cluster-autoscaler -n kube-system"
+          - "   Application logs: kubectl logs -f deployment/do-sample-app"
+          - ""
+          - "💡 LoadBalancers may take 2-3 minutes to be fully accessible"

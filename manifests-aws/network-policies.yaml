@@ -1,0 +1,399 @@
+---
+# Zero-Trust Network Policies Implementation
+# Chapter 3: Infrastructure Platforms - Network Resources
+# Implements: "Zero-Trust Security Model with SDN" (página 32)
+
+# ============================================
+# PHASE 1: Default Deny All Traffic
+# ============================================
+# Principle: "each application and service has only the privileges 
+#            and access it explicitly requires"
+
+---
+# Deny all ingress traffic by default in the default namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all-ingress
+  namespace: default
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector: {}  # Applies to all pods in namespace
+  policyTypes:
+  - Ingress
+
+---
+# Deny all egress traffic by default in the default namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all-egress
+  namespace: default
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector: {}  # Applies to all pods in namespace
+  policyTypes:
+  - Egress
+
+---
+# ============================================
+# PHASE 2: Allow DNS Resolution (Required for all pods)
+# ============================================
+
+---
+# Allow DNS queries to kube-dns/CoreDNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-access
+  namespace: default
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector: {}  # All pods need DNS
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# ============================================
+# PHASE 3: Application-Specific Policies
+# ============================================
+
+---
+# Policy for do-sample-app: Allow ingress from LoadBalancer and egress to PostgreSQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: do-sample-app-policy
+  namespace: default
+  labels:
+    app: do-sample-app
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app: do-sample-app
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from LoadBalancer (any source for now, as LB is external)
+  - from:
+    - podSelector: {}  # Allow from any pod (LoadBalancer traffic comes through nodes)
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow egress to PostgreSQL
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow egress to metrics server (for health checks)
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: metrics-server
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# Policy for PostgreSQL: Allow ingress only from do-sample-app
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql-policy
+  namespace: default
+  labels:
+    app: postgresql
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow connections only from do-sample-app
+  - from:
+    - podSelector:
+        matchLabels:
+          app: do-sample-app
+    ports:
+    - protocol: TCP
+      port: 5432
+  egress:
+  # PostgreSQL doesn't need to initiate connections (except DNS, handled by allow-dns-access)
+  []
+
+---
+# ============================================
+# PHASE 4: Monitoring & Observability
+# ============================================
+
+---
+# Policy for Locust: Allow access to do-sample-app and web UI
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: locust-policy
+  namespace: default
+  labels:
+    app: locust
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app: locust
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow access to Locust web UI from anywhere (for load testing)
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8089
+    - protocol: TCP
+      port: 5557
+    - protocol: TCP
+      port: 5558
+  egress:
+  # Allow Locust to send traffic to do-sample-app
+  - to:
+    - podSelector:
+        matchLabels:
+          app: do-sample-app
+    ports:
+    - protocol: TCP
+      port: 8080
+  # Allow Locust workers to communicate with master
+  - to:
+    - podSelector:
+        matchLabels:
+          app: locust
+    ports:
+    - protocol: TCP
+      port: 5557
+    - protocol: TCP
+      port: 5558
+
+---
+# ============================================
+# PHASE 5: Drift Monitor Access
+# ============================================
+
+---
+# Policy for drift-monitor: Allow egress to Kubernetes API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: drift-monitor-policy
+  namespace: default
+  labels:
+    app: drift-monitor
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app: drift-monitor
+  policyTypes:
+  - Egress
+  egress:
+  # Allow access to Kubernetes API server
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: default
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow access to AWS metadata service (for IAM credentials)
+  - to:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# ============================================
+# PHASE 6: Monitoring Namespace (Prometheus/Grafana)
+# ============================================
+
+---
+# Default deny for monitoring namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all-ingress
+  namespace: monitoring
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+
+---
+# Allow Prometheus to scrape metrics from default namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scraping
+  namespace: default
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app: do-sample-app
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+    ports:
+    - protocol: TCP
+      port: 8080
+
+---
+# Allow Grafana ingress from LoadBalancer
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-grafana-ingress
+  namespace: monitoring
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: grafana
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector: {}  # Allow from LoadBalancer
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+
+---
+# Allow Prometheus to access its own components
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-internal-policy
+  namespace: monitoring
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: grafana
+    ports:
+    - protocol: TCP
+      port: 9090
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: prometheus
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow Prometheus to scrape targets in all namespaces
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 10250  # kubelet metrics
+
+---
+# Allow DNS in monitoring namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-access
+  namespace: monitoring
+  labels:
+    purpose: zero-trust-security
+    chapter: "3"
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    - podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53

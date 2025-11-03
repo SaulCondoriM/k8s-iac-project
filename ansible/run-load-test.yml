@@ -1,0 +1,140 @@
+---
+- name: Run Load Test and Monitor Autoscaling
+  hosts: localhost
+  gather_facts: no
+  vars:
+    namespace: default
+    monitoring_namespace: monitoring
+    test_duration: 600  # 10 minutes
+    users: 100
+    spawn_rate: 10
+    
+  tasks:
+    - name: Get current pod count
+      command: kubectl get pods -l app=do-sample-app -n {{ namespace }} --no-headers
+      register: initial_pods
+      changed_when: false
+      
+    - name: Display initial state
+      debug:
+        msg: 
+          - "=== INITIAL STATE ==="
+          - "Number of application pods: {{ initial_pods.stdout_lines | length }}"
+          
+    - name: Get HPA initial metrics
+      command: kubectl get hpa do-sample-app-hpa -n {{ namespace }}
+      register: initial_hpa
+      changed_when: false
+      
+    - name: Display initial HPA metrics
+      debug:
+        msg: "{{ initial_hpa.stdout_lines }}"
+        
+    - name: Start monitoring HPA in background
+      shell: |
+        kubectl get hpa do-sample-app-hpa -n {{ namespace }} -w > /tmp/hpa-monitoring.log 2>&1 &
+        echo $!
+      register: hpa_monitor_pid
+      changed_when: false
+      
+    - name: Start monitoring pods in background
+      shell: |
+        watch -n 5 "kubectl get pods -l app=do-sample-app -n {{ namespace }}" > /tmp/pods-monitoring.log 2>&1 &
+        echo $!
+      register: pods_monitor_pid
+      changed_when: false
+      
+    - name: Get Locust service external IP
+      command: kubectl get svc locust-master-service -n {{ namespace }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      register: locust_ip
+      changed_when: false
+      retries: 10
+      delay: 10
+      until: locust_ip.stdout != ""
+      
+    - name: Display Locust access info
+      debug:
+        msg:
+          - "=== LOAD TESTING ==="
+          - "Locust UI is available at: http://{{ locust_ip.stdout }}:8089"
+          - "Target: http://do-sample-app-service:8080"
+          - ""
+          - "You can start the load test manually through the UI or use headless mode"
+          - "Monitoring HPA changes in the background..."
+          
+    - name: Wait and monitor (allowing manual test start)
+      pause:
+        prompt: |
+          
+          ======================================
+          LOAD TEST READY
+          ======================================
+          
+          Option 1 - Manual (Recommended):
+          1. Open browser: http://{{ locust_ip.stdout }}:8089
+          2. Set number of users: {{ users }}
+          3. Set spawn rate: {{ spawn_rate }}
+          4. Click "Start swarming"
+          
+          Option 2 - Continue for automated headless test
+          
+          Press ENTER to continue with automated test or Ctrl+C to manage manually...
+          
+    - name: Run headless load test
+      shell: |
+        kubectl exec -n {{ namespace }} $(kubectl get pod -n {{ namespace }} -l app=locust-master -o jsonpath='{.items[0].metadata.name}') -- \
+        locust --headless -u {{ users }} -r {{ spawn_rate }} --run-time {{ test_duration }}s --host http://do-sample-app-service:8080
+      register: load_test_result
+      async: "{{ test_duration + 60 }}"
+      poll: 30
+      
+    - name: Monitor autoscaling for duration
+      shell: |
+        for i in {1..20}; do
+          echo "=== Check $i at $(date) ==="
+          kubectl get hpa do-sample-app-hpa -n {{ namespace }}
+          kubectl get pods -l app=do-sample-app -n {{ namespace }}
+          echo ""
+          sleep 30
+        done
+      register: monitoring_output
+      
+    - name: Display monitoring results
+      debug:
+        msg: "{{ monitoring_output.stdout_lines }}"
+        
+    - name: Get final pod count
+      command: kubectl get pods -l app=do-sample-app -n {{ namespace }} --no-headers
+      register: final_pods
+      changed_when: false
+      
+    - name: Get final HPA metrics
+      command: kubectl get hpa do-sample-app-hpa -n {{ namespace }}
+      register: final_hpa
+      changed_when: false
+      
+    - name: Display final state
+      debug:
+        msg:
+          - "=== FINAL STATE ==="
+          - "Initial pods: {{ initial_pods.stdout_lines | length }}"
+          - "Final pods: {{ final_pods.stdout_lines | length }}"
+          - "Scaling events: Check monitoring logs"
+          - ""
+          - "Final HPA status:"
+          - "{{ final_hpa.stdout_lines }}"
+          
+    - name: Stop background monitors
+      shell: |
+        kill {{ hpa_monitor_pid.stdout }} 2>/dev/null || true
+        kill {{ pods_monitor_pid.stdout }} 2>/dev/null || true
+        killall watch 2>/dev/null || true
+      changed_when: false
+      ignore_errors: yes
+      
+    - name: Display monitoring logs location
+      debug:
+        msg:
+          - "Monitoring logs saved to:"
+          - "  - /tmp/hpa-monitoring.log"
+          - "  - /tmp/pods-monitoring.log"
