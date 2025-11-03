@@ -1,0 +1,283 @@
+---
+# Stack 5: Application Stack
+# Chapter 5: Micro Stack Pattern - Page 62
+# 
+# Purpose: User-facing application deployment
+# Blast Radius: ~15% (only affects the application)
+# Dependencies: Compute Stack, Database Stack
+# Deploy Frequency: Multiple times daily (CI/CD)
+
+- name: Application Stack - do-sample-app and Services
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars_files:
+    - ../shared-vars.yml
+  
+  tasks:
+    # ========================================================================
+    # Pre-deployment Validation
+    # ========================================================================
+    
+    - name: "[Validation] Check kubectl is available"
+      command: kubectl version --client --short
+      register: kubectl_check
+      changed_when: false
+      failed_when: kubectl_check.rc != 0
+      
+    - name: "[Validation] Verify cluster is accessible"
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      failed_when: cluster_info.rc != 0
+      
+    - name: "[Validation] Check if database is running"
+      command: >
+        kubectl get pods -n {{ namespace_default }} 
+        -l app.kubernetes.io/name=postgresql 
+        -o jsonpath='{.items[*].status.phase}'
+      register: db_check
+      changed_when: false
+      
+    - name: "[Validation] Display database status"
+      debug:
+        msg: "{{ 'Database is running' if 'Running' in db_check.stdout else 'WARNING: Database not found - application may fail to start' }}"
+      
+    # ========================================================================
+    # Application Deployment
+    # ========================================================================
+    
+    - name: "[Application] Check if application is already deployed"
+      command: >
+        kubectl get deployment do-sample-app 
+        -n {{ namespace_default }}
+      register: app_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Application] Apply application deployment"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/application.yaml
+      register: app_deploy
+      
+    - name: "[Application] Wait for application deployment to be ready"
+      command: >
+        kubectl wait --for=condition=available deployment/do-sample-app 
+        -n {{ namespace_default }} 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: app_deploy is changed
+      
+    - name: "[Application] Verify application pods are running"
+      command: >
+        kubectl get pods -n {{ namespace_default }} 
+        -l app=do-sample-app 
+        -o jsonpath='{.items[*].status.phase}'
+      register: app_pods
+      changed_when: false
+      
+    # ========================================================================
+    # Horizontal Pod Autoscaler (HPA)
+    # ========================================================================
+    
+    - name: "[HPA] Check if HPA is configured"
+      command: >
+        kubectl get hpa do-sample-app-hpa 
+        -n {{ namespace_default }}
+      register: hpa_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[HPA] Apply HPA configuration"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/hpa.yaml
+      when: hpa_check.rc != 0
+      
+    - name: "[HPA] Get HPA status"
+      command: >
+        kubectl get hpa do-sample-app-hpa 
+        -n {{ namespace_default }} 
+        -o jsonpath='{.status.currentReplicas}/{.spec.maxReplicas}'
+      register: hpa_status
+      changed_when: false
+      
+    - name: "[HPA] Display HPA configuration"
+      debug:
+        msg: "HPA Status: {{ hpa_status.stdout }} replicas (min: {{ app_hpa_min_replicas }}, max: {{ app_hpa_max_replicas }})"
+      
+    # ========================================================================
+    # Network Policies (Zero-Trust - Chapter 3)
+    # ========================================================================
+    
+    - name: "[Network] Check if Calico is installed"
+      command: >
+        kubectl get pods -n kube-system 
+        -l k8s-app=calico-node 
+        --no-headers
+      register: calico_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Network] Display Calico status"
+      debug:
+        msg: "{{ 'Calico is running (' + (calico_check.stdout_lines | length | string) + ' nodes)' if calico_check.rc == 0 else 'WARNING: Calico not found - Network Policies will not work' }}"
+      
+    - name: "[Network] Apply Zero-Trust Network Policies"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/network-policies-simple.yaml
+      when: 
+        - calico_check.rc == 0
+        - network_policies_enabled | bool
+      
+    - name: "[Network] Count active Network Policies"
+      command: >
+        kubectl get networkpolicies -n {{ namespace_default }} --no-headers
+      register: np_count
+      changed_when: false
+      when: network_policies_enabled | bool
+      
+    - name: "[Network] Display Network Policy status"
+      debug:
+        msg: "Network Policies: {{ np_count.stdout_lines | length }} active (Zero-Trust model)"
+      when: network_policies_enabled | bool
+      
+    # ========================================================================
+    # Load Testing (Locust)
+    # ========================================================================
+    
+    - name: "[Load Testing] Check if Locust is deployed"
+      command: >
+        kubectl get deployment locust 
+        -n {{ namespace_default }}
+      register: locust_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Load Testing] Apply Locust deployment"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/locust.yaml
+      when: locust_check.rc != 0
+      
+    - name: "[Load Testing] Wait for Locust to be ready"
+      command: >
+        kubectl wait --for=condition=available deployment/locust 
+        -n {{ namespace_default }} 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: locust_check.rc != 0
+      
+    # ========================================================================
+    # Service Discovery and Endpoints
+    # ========================================================================
+    
+    - name: "[Discovery] Get application LoadBalancer URL"
+      shell: >
+        kubectl get svc do-sample-app-service 
+        -n {{ namespace_default }} 
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+      register: app_url
+      changed_when: false
+      until: app_url.stdout != ""
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+      
+    - name: "[Discovery] Get Locust LoadBalancer URL"
+      shell: >
+        kubectl get svc locust 
+        -n {{ namespace_default }} 
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+      register: locust_url
+      changed_when: false
+      until: locust_url.stdout != ""
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+      when: locust_check.rc == 0 or locust_check is changed
+      
+    # ========================================================================
+    # Post-deployment Validation
+    # ========================================================================
+    
+    - name: "[Health Check] Test application HTTP endpoint"
+      uri:
+        url: "http://{{ app_url.stdout }}"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: app_health
+      changed_when: false
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+      until: app_health.status == 200
+      
+    - name: "[Health Check] Get application pod logs (last 5 lines)"
+      shell: >
+        kubectl logs -n {{ namespace_default }} 
+        -l app=do-sample-app 
+        --tail=5 
+        --timestamps
+      register: app_logs
+      changed_when: false
+      
+    - name: "[Health Check] Check for database connection errors"
+      set_fact:
+        db_errors: "{{ app_logs.stdout | regex_search('conn busy|connection refused|database error') | default(false) }}"
+      
+    - name: "[Health Check] Display database connection status"
+      debug:
+        msg: "{{ 'WARNING: Database connection errors detected' if db_errors else 'Database connection: OK' }}"
+      
+    # ========================================================================
+    # Stack Deployment Summary
+    # ========================================================================
+    
+    - name: "[Summary] Display Application Stack deployment results"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║         APPLICATION STACK DEPLOYMENT COMPLETE                 ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "📊 Stack Information:"
+          - "  • Stack Name: Application Stack (Stack 5/5)"
+          - "  • Blast Radius: ~15%"
+          - "  • Dependencies: Compute Stack, Database Stack"
+          - "  • Deployment Time: {{ ansible_date_time.time }}"
+          - ""
+          - "✅ Components Deployed:"
+          - "  • Application: {{ app_pods.stdout }} ({{ hpa_status.stdout }} replicas)"
+          - "  • HPA: Configured ({{ app_hpa_min_replicas }}-{{ app_hpa_max_replicas }} pods)"
+          - "  • Database: {{ 'Connected' if not db_errors else 'Connection Issues' }}"
+          - "  • Network Policies: {{ np_count.stdout_lines | length if network_policies_enabled else 'Disabled' }}"
+          - "  • Load Testing: {{ 'Ready' if locust_check.rc == 0 or locust_check is changed else 'Not deployed' }}"
+          - ""
+          - "🌐 Access URLs:"
+          - "  • Application: http://{{ app_url.stdout }}"
+          - "  • Locust UI: http://{{ locust_url.stdout }}:8089"
+          - "  • Health: {{ app_health.status }} {{ app_health.msg }}"
+          - ""
+          - "📈 Autoscaling Configuration:"
+          - "  • Min Replicas: {{ app_hpa_min_replicas }}"
+          - "  • Max Replicas: {{ app_hpa_max_replicas }}"
+          - "  • CPU Target: {{ app_hpa_cpu_threshold }}%"
+          - "  • Current: {{ hpa_status.stdout }} replicas"
+          - ""
+          - "🛡️ Security (Zero-Trust - Chapter 3):"
+          - "  • Calico: {{ 'Running on ' + (calico_check.stdout_lines | length | string) + ' nodes' if calico_check.rc == 0 else 'Not installed' }}"
+          - "  • Network Policies: {{ np_count.stdout_lines | length if network_policies_enabled else '0' }}"
+          - "  • Default: Deny-all baseline"
+          - "  • Allowed: Only explicit connections"
+          - ""
+          - "🔍 Validation Commands:"
+          - "  • kubectl get pods -l app=do-sample-app"
+          - "  • kubectl get hpa do-sample-app-hpa"
+          - "  • kubectl logs -l app=do-sample-app --tail=50"
+          - "  • curl http://{{ app_url.stdout }}"
+          - ""
+          - "🧪 Load Testing:"
+          - "  1. Open http://{{ locust_url.stdout }}:8089"
+          - "  2. Set users: 50, spawn rate: 5"
+          - "  3. Host: http://do-sample-app-service"
+          - "  4. Watch HPA scale: kubectl get hpa -w"
+          - ""
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║  Chapter 5: Micro Stack Pattern - Application Stack Ready    ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"

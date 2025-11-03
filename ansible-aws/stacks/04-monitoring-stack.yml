@@ -1,0 +1,255 @@
+---
+# Stack 4: Monitoring Stack
+# Chapter 5: Micro Stack Pattern - Page 62
+# 
+# Purpose: Observability and metrics collection
+# Blast Radius: ~10% (doesn't affect running applications)
+# Dependencies: Compute Stack (requires EKS cluster)
+# Deploy Frequency: Daily (dashboards, alerts)
+
+- name: Monitoring Stack - Prometheus and Grafana
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars_files:
+    - ../shared-vars.yml
+  
+  tasks:
+    # ========================================================================
+    # Pre-deployment Validation
+    # ========================================================================
+    
+    - name: "[Validation] Check if kubectl is available"
+      command: kubectl version --client --short
+      register: kubectl_check
+      changed_when: false
+      failed_when: kubectl_check.rc != 0
+      
+    - name: "[Validation] Verify EKS cluster is accessible"
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      failed_when: cluster_info.rc != 0
+      
+    - name: "[Validation] Check monitoring namespace exists"
+      command: kubectl get namespace {{ namespace_monitoring }}
+      register: ns_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Validation] Create monitoring namespace if not exists"
+      command: kubectl create namespace {{ namespace_monitoring }}
+      when: ns_check.rc != 0
+      
+    # ========================================================================
+    # Helm Repository Configuration
+    # ========================================================================
+    
+    - name: "[Helm] Add Prometheus Community chart repository"
+      command: >
+        helm repo add prometheus-community 
+        {{ prometheus_chart_repo }}
+      changed_when: false
+      
+    - name: "[Helm] Update Helm repositories"
+      command: helm repo update
+      changed_when: false
+      
+    # ========================================================================
+    # Prometheus + Grafana Installation
+    # ========================================================================
+    
+    - name: "[Monitoring] Check if Prometheus is already installed"
+      command: >
+        helm list -n {{ namespace_monitoring }} 
+        --filter prometheus 
+        --output json
+      register: prometheus_check
+      changed_when: false
+      
+    - name: "[Monitoring] Display Prometheus status"
+      debug:
+        msg: "{{ 'Prometheus already installed' if (prometheus_check.stdout | from_json | length > 0) else 'Installing Prometheus...' }}"
+    
+    - name: "[Monitoring] Install kube-prometheus-stack (Prometheus + Grafana)"
+      command: >
+        helm install prometheus prometheus-community/kube-prometheus-stack
+        --namespace {{ namespace_monitoring }}
+        --set grafana.service.type={{ grafana_service_type }}
+        --set grafana.sidecar.dashboards.enabled=true
+        --set grafana.sidecar.dashboards.label=grafana_dashboard
+        --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false
+        --timeout {{ helm_install_timeout }}s
+      when: (prometheus_check.stdout | from_json | length == 0)
+      register: prometheus_install
+      
+    - name: "[Monitoring] Wait for Prometheus pods to be ready"
+      command: >
+        kubectl wait --for=condition=ready pod 
+        -l app.kubernetes.io/name=prometheus 
+        -n {{ namespace_monitoring }} 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: prometheus_install is changed
+      
+    - name: "[Monitoring] Wait for Grafana pods to be ready"
+      command: >
+        kubectl wait --for=condition=ready pod 
+        -l app.kubernetes.io/name=grafana 
+        -n {{ namespace_monitoring }} 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: prometheus_install is changed
+      
+    # ========================================================================
+    # DORA Metrics Dashboard (Chapter 1)
+    # ========================================================================
+    
+    - name: "[DORA] Check if DORA metrics dashboard ConfigMap exists"
+      command: >
+        kubectl get configmap dora-metrics-dashboard 
+        -n {{ namespace_monitoring }}
+      register: dora_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[DORA] Apply DORA Four Key Metrics dashboard"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/dora-metrics-dashboard.yaml
+      when: dora_check.rc != 0
+      
+    - name: "[DORA] Verify DORA dashboard ConfigMap"
+      command: >
+        kubectl get configmap dora-metrics-dashboard 
+        -n {{ namespace_monitoring }} 
+        -o jsonpath='{.metadata.name}'
+      register: dora_verify
+      changed_when: false
+      
+    - name: "[DORA] Display dashboard status"
+      debug:
+        msg: "DORA Metrics dashboard: {{ dora_verify.stdout | default('Not found') }}"
+      
+    # ========================================================================
+    # Drift Monitor CronJob (Chapter 2)
+    # ========================================================================
+    
+    - name: "[Drift] Check if drift-monitor CronJob exists"
+      command: >
+        kubectl get cronjob drift-monitor 
+        -n {{ namespace_default }}
+      register: drift_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Drift] Apply drift-monitor CronJob"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/drift-monitor.yaml
+      when: drift_check.rc != 0
+      
+    - name: "[Drift] Verify drift-monitor CronJob"
+      command: >
+        kubectl get cronjob drift-monitor 
+        -n {{ namespace_default }} 
+        -o jsonpath='{.metadata.name}'
+      register: drift_verify
+      changed_when: false
+      
+    - name: "[Drift] Display drift monitor status"
+      debug:
+        msg: "Drift Monitor CronJob: {{ drift_verify.stdout | default('Not found') }}"
+      
+    # ========================================================================
+    # Service Discovery and Endpoints
+    # ========================================================================
+    
+    - name: "[Discovery] Get Grafana LoadBalancer URL"
+      shell: >
+        kubectl get svc -n {{ namespace_monitoring }} 
+        prometheus-grafana 
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+      register: grafana_url
+      changed_when: false
+      until: grafana_url.stdout != ""
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+      
+    - name: "[Discovery] Get Grafana admin password"
+      shell: >
+        kubectl get secret -n {{ namespace_monitoring }} 
+        {{ grafana_admin_password_secret }} 
+        -o jsonpath="{.data.admin-password}" | base64 --decode
+      register: grafana_password
+      changed_when: false
+      no_log: true
+      
+    # ========================================================================
+    # Post-deployment Validation
+    # ========================================================================
+    
+    - name: "[Health Check] Verify Prometheus is healthy"
+      command: >
+        kubectl get pods -n {{ namespace_monitoring }} 
+        -l app.kubernetes.io/name=prometheus 
+        -o jsonpath='{.items[*].status.phase}'
+      register: prometheus_health
+      changed_when: false
+      failed_when: "'Running' not in prometheus_health.stdout"
+      
+    - name: "[Health Check] Verify Grafana is healthy"
+      command: >
+        kubectl get pods -n {{ namespace_monitoring }} 
+        -l app.kubernetes.io/name=grafana 
+        -o jsonpath='{.items[*].status.phase}'
+      register: grafana_health
+      changed_when: false
+      failed_when: "'Running' not in grafana_health.stdout"
+      
+    - name: "[Health Check] Count Prometheus targets"
+      shell: >
+        kubectl get servicemonitors -A --no-headers | wc -l
+      register: target_count
+      changed_when: false
+      
+    # ========================================================================
+    # Stack Deployment Summary
+    # ========================================================================
+    
+    - name: "[Summary] Display Monitoring Stack deployment results"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║          MONITORING STACK DEPLOYMENT COMPLETE                 ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "📊 Stack Information:"
+          - "  • Stack Name: Monitoring Stack (Stack 4/5)"
+          - "  • Blast Radius: ~10%"
+          - "  • Dependencies: Compute Stack"
+          - "  • Deployment Time: {{ ansible_date_time.time }}"
+          - ""
+          - "✅ Components Deployed:"
+          - "  • Prometheus: {{ prometheus_health.stdout }}"
+          - "  • Grafana: {{ grafana_health.stdout }}"
+          - "  • DORA Dashboard: {{ dora_verify.stdout | default('Not deployed') }}"
+          - "  • Drift Monitor: {{ drift_verify.stdout | default('Not deployed') }}"
+          - "  • ServiceMonitors: {{ target_count.stdout }} targets"
+          - ""
+          - "🌐 Access URLs:"
+          - "  • Grafana: http://{{ grafana_url.stdout }}"
+          - "  • Username: admin"
+          - "  • Password: {{ grafana_password.stdout }}"
+          - ""
+          - "📈 Available Dashboards:"
+          - "  • DORA Four Key Metrics (Chapter 1)"
+          - "  • Kubernetes / Compute Resources / Cluster"
+          - "  • Kubernetes / Compute Resources / Namespace"
+          - "  • Node Exporter / Nodes"
+          - ""
+          - "🔍 Validation Commands:"
+          - "  • kubectl get pods -n {{ namespace_monitoring }}"
+          - "  • kubectl get servicemonitors -A"
+          - "  • kubectl logs cronjob/drift-monitor"
+          - ""
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║  Chapter 5: Micro Stack Pattern - Monitoring Stack Ready     ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"

@@ -1,0 +1,182 @@
+---
+# Cleanup All Stacks (Reverse Order)
+# Chapter 5: Micro Stack Pattern
+#
+# Deletes all infrastructure stacks in reverse dependency order
+# to prevent orphaned resources and dependency errors.
+#
+# ⚠️  WARNING: This will DELETE all infrastructure!
+# Use with caution in production environments.
+
+- name: Cleanup All Infrastructure Stacks
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars_files:
+    - shared-vars.yml
+    
+  vars_prompt:
+    - name: confirm_delete
+      prompt: "⚠️  This will DELETE all infrastructure. Type 'yes' to confirm"
+      private: no
+  
+  tasks:
+    # ========================================================================
+    # Confirmation Check
+    # ========================================================================
+    
+    - name: "[Safety] Verify deletion confirmation"
+      fail:
+        msg: "Deletion cancelled. User did not confirm with 'yes'"
+      when: confirm_delete != "yes"
+    
+    - name: "[Cleanup] Display deletion banner"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║            INFRASTRUCTURE STACK CLEANUP                       ║"
+          - "║               ⚠️  DELETING ALL RESOURCES ⚠️                   ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "Deletion order (reverse dependencies):"
+          - "  5. Application Stack"
+          - "  4. Monitoring Stack"
+          - "  3. Database Stack"
+          - "  2. Compute Stack (EKS cluster)"
+          - "  1. Network Stack"
+          - ""
+          - "Starting cleanup at {{ ansible_date_time.iso8601 }}"
+          - ""
+    
+    # ========================================================================
+    # Stack 5: Application Stack
+    # ========================================================================
+    
+    - name: "[5/5] Delete Application Stack"
+      block:
+        - debug:
+            msg: "Deleting Application Stack (do-sample-app, HPA, services)..."
+        
+        - command: kubectl delete -f {{ manifests_dir }}/application.yaml
+          failed_when: false
+          
+        - command: kubectl delete -f {{ manifests_dir }}/hpa.yaml
+          failed_when: false
+          
+        - command: kubectl delete -f {{ manifests_dir }}/network-policies-simple.yaml
+          failed_when: false
+          
+        - command: kubectl delete -f {{ manifests_dir }}/locust.yaml
+          failed_when: false
+          
+        - debug:
+            msg: "✅ Application Stack deleted"
+      tags: [application]
+    
+    # ========================================================================
+    # Stack 4: Monitoring Stack
+    # ========================================================================
+    
+    - name: "[4/5] Delete Monitoring Stack"
+      block:
+        - debug:
+            msg: "Deleting Monitoring Stack (Prometheus, Grafana)..."
+        
+        - command: helm uninstall prometheus -n {{ namespace_monitoring }}
+          failed_when: false
+          
+        - command: kubectl delete -f {{ manifests_dir }}/drift-monitor.yaml
+          failed_when: false
+          
+        - command: kubectl delete namespace {{ namespace_monitoring }}
+          failed_when: false
+          
+        - debug:
+            msg: "✅ Monitoring Stack deleted"
+      tags: [monitoring]
+    
+    # ========================================================================
+    # Stack 3: Database Stack
+    # ========================================================================
+    
+    - name: "[3/5] Delete Database Stack"
+      block:
+        - debug:
+            msg: "Deleting Database Stack (PostgreSQL, PVCs)..."
+        
+        - command: helm uninstall postgresdb -n {{ namespace_default }}
+          failed_when: false
+          
+        - command: kubectl delete pvc -l app.kubernetes.io/name=postgresql -n {{ namespace_default }}
+          failed_when: false
+          
+        - command: kubectl delete -f {{ manifests_dir }}/storage-class.yaml
+          failed_when: false
+          
+        - debug:
+            msg: "✅ Database Stack deleted"
+      tags: [database]
+    
+    # ========================================================================
+    # Stack 2: Compute Stack
+    # ========================================================================
+    
+    - name: "[2/5] Delete Compute Stack"
+      block:
+        - debug:
+            msg: "Deleting Compute Stack (EKS cluster) - This will take ~10 minutes..."
+        
+        - command: eksctl delete cluster -f cluster-config.yaml
+          async: 900
+          poll: 30
+          failed_when: false
+          
+        - debug:
+            msg: "✅ Compute Stack deleted"
+      tags: [compute]
+    
+    # ========================================================================
+    # Stack 1: Network Stack
+    # ========================================================================
+    
+    - name: "[1/5] Network Stack Cleanup"
+      debug:
+        msg:
+          - "Network Stack cleanup:"
+          - "VPC and networking resources were managed by eksctl and"
+          - "have been deleted as part of the cluster deletion."
+          - "✅ Network Stack cleanup complete"
+      tags: [network]
+    
+    # ========================================================================
+    # Final Summary
+    # ========================================================================
+    
+    - name: "[Cleanup] Display completion summary"
+      debug:
+        msg:
+          - ""
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║          INFRASTRUCTURE CLEANUP COMPLETE                      ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "✅ All stacks deleted:"
+          - "   • Application Stack: Deployments, Services, HPA"
+          - "   • Monitoring Stack: Prometheus, Grafana, Dashboards"
+          - "   • Database Stack: PostgreSQL, PVCs"
+          - "   • Compute Stack: EKS cluster, Node groups"
+          - "   • Network Stack: VPC, Subnets (via eksctl)"
+          - ""
+          - "💰 Cost Savings: ~$2-5/hour stopped"
+          - ""
+          - "🔍 Verify cleanup:"
+          - "   aws eks list-clusters --region {{ aws_region }}"
+          - "   aws ec2 describe-vpcs --region {{ aws_region }}"
+          - "   aws ec2 describe-instances --region {{ aws_region }}"
+          - ""
+          - "📝 To recreate infrastructure:"
+          - "   ansible-playbook deploy-all-stacks.yml"
+          - ""
+          - "Cleanup completed at {{ ansible_date_time.iso8601 }}"
+          - ""

@@ -1,0 +1,298 @@
+---
+# Stack 2: Database Stack
+# Chapter 5: Micro Stack Pattern - Page 62
+# 
+# Purpose: Persistent data storage layer
+# Blast Radius: ~20% (affects database and dependent applications)
+# Dependencies: Network Stack
+# Deploy Frequency: Weekly (backups, scaling, maintenance)
+
+- name: Database Stack - PostgreSQL and Storage
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars_files:
+    - ../shared-vars.yml
+  
+  tasks:
+    # ========================================================================
+    # Pre-deployment Validation
+    # ========================================================================
+    
+    - name: "[Validation] Check kubectl is available"
+      command: kubectl version --client --short
+      register: kubectl_check
+      changed_when: false
+      failed_when: kubectl_check.rc != 0
+      
+    - name: "[Validation] Verify cluster is accessible"
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      failed_when: cluster_info.rc != 0
+      
+    - name: "[Validation] Check if EBS CSI driver is installed"
+      command: >
+        kubectl get pods -n kube-system 
+        -l app.kubernetes.io/name=aws-ebs-csi-driver 
+        --no-headers
+      register: csi_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Validation] Display CSI driver status"
+      debug:
+        msg: "{{ 'EBS CSI Driver is running (' + (csi_check.stdout_lines | length | string) + ' pods)' if csi_check.rc == 0 else 'WARNING: CSI driver not found - storage may not work' }}"
+      
+    # ========================================================================
+    # Storage Class Configuration
+    # ========================================================================
+    
+    - name: "[Storage] Check if StorageClass exists"
+      command: >
+        kubectl get storageclass {{ storage_class_name }}
+      register: sc_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Storage] Apply EBS StorageClass"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/storage-class.yaml
+      when: sc_check.rc != 0
+      
+    - name: "[Storage] Verify StorageClass"
+      command: >
+        kubectl get storageclass {{ storage_class_name }} 
+        -o jsonpath='{.provisioner}'
+      register: sc_verify
+      changed_when: false
+      
+    - name: "[Storage] Display StorageClass details"
+      debug:
+        msg: "StorageClass: {{ storage_class_name }} (Provisioner: {{ sc_verify.stdout }})"
+      
+    # ========================================================================
+    # Helm Repository for PostgreSQL
+    # ========================================================================
+    
+    - name: "[Helm] Add Bitnami chart repository"
+      command: >
+        helm repo add bitnami {{ postgres_chart_repo }}
+      changed_when: false
+      
+    - name: "[Helm] Update Helm repositories"
+      command: helm repo update
+      changed_when: false
+      
+    # ========================================================================
+    # PostgreSQL Deployment
+    # ========================================================================
+    
+    - name: "[Database] Check if PostgreSQL is already installed"
+      command: >
+        helm list -n {{ namespace_default }} 
+        --filter postgresdb 
+        --output json
+      register: postgres_check
+      changed_when: false
+      
+    - name: "[Database] Display PostgreSQL status"
+      debug:
+        msg: "{{ 'PostgreSQL already installed' if (postgres_check.stdout | from_json | length > 0) else 'Installing PostgreSQL...' }}"
+    
+    - name: "[Database] Install PostgreSQL via Helm"
+      command: >
+        helm install postgresdb bitnami/postgresql
+        --namespace {{ namespace_default }}
+        --set primary.persistence.size={{ postgres_volume_size }}
+        --set volumePermissions.enabled={{ postgres_volume_permissions }}
+        --set primary.persistence.storageClass={{ storage_class_name }}
+        --timeout {{ helm_install_timeout }}s
+      when: (postgres_check.stdout | from_json | length == 0)
+      register: postgres_install
+      
+    - name: "[Database] Wait for PostgreSQL pod to be ready"
+      command: >
+        kubectl wait --for=condition=ready pod 
+        -l app.kubernetes.io/name=postgresql 
+        -n {{ namespace_default }} 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: postgres_install is changed
+      
+    # ========================================================================
+    # Database Credentials
+    # ========================================================================
+    
+    - name: "[Secrets] Get PostgreSQL password"
+      shell: >
+        kubectl get secret postgresdb-postgresql 
+        -n {{ namespace_default }} 
+        -o jsonpath="{.data.postgres-password}" | base64 --decode
+      register: postgres_password
+      changed_when: false
+      no_log: true
+      
+    - name: "[Secrets] Check if connection string secret exists"
+      command: >
+        kubectl get secret postgres-connection 
+        -n {{ namespace_default }}
+      register: conn_secret_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Secrets] Apply connection string secret"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/postgres-connection.yaml
+      when: conn_secret_check.rc != 0
+      
+    # ========================================================================
+    # Persistent Volume Verification
+    # ========================================================================
+    
+    - name: "[Volume] Get PostgreSQL PVC status"
+      command: >
+        kubectl get pvc -n {{ namespace_default }} 
+        -l app.kubernetes.io/name=postgresql 
+        -o jsonpath='{.items[*].status.phase}'
+      register: pvc_status
+      changed_when: false
+      
+    - name: "[Volume] Get PVC size"
+      command: >
+        kubectl get pvc -n {{ namespace_default }} 
+        -l app.kubernetes.io/name=postgresql 
+        -o jsonpath='{.items[*].spec.resources.requests.storage}'
+      register: pvc_size
+      changed_when: false
+      
+    - name: "[Volume] Display volume status"
+      debug:
+        msg: "PVC Status: {{ pvc_status.stdout }} ({{ pvc_size.stdout }})"
+      
+    # ========================================================================
+    # Database Health Check
+    # ========================================================================
+    
+    - name: "[Health Check] Verify PostgreSQL is accepting connections"
+      command: >
+        kubectl exec -n {{ namespace_default }} 
+        deployment/postgresdb-postgresql 
+        -- pg_isready -U postgres
+      register: db_health
+      changed_when: false
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+      until: db_health.rc == 0
+      
+    - name: "[Health Check] Get PostgreSQL version"
+      shell: >
+        kubectl exec -n {{ namespace_default }} 
+        deployment/postgresdb-postgresql 
+        -- psql -U postgres -t -c "SELECT version();" | head -1
+      register: pg_version
+      changed_when: false
+      
+    - name: "[Health Check] Count database connections"
+      shell: >
+        kubectl exec -n {{ namespace_default }} 
+        deployment/postgresdb-postgresql 
+        -- psql -U postgres -t -c "SELECT count(*) FROM pg_stat_activity;" | xargs
+      register: db_connections
+      changed_when: false
+      
+    # ========================================================================
+    # Backup Configuration (Optional)
+    # ========================================================================
+    
+    - name: "[Backup] Check if backup CronJob exists"
+      command: >
+        kubectl get cronjob postgres-backup 
+        -n {{ namespace_default }}
+      register: backup_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Backup] Display backup status"
+      debug:
+        msg: "{{ 'Backup CronJob configured' if backup_check.rc == 0 else 'No backup configured (consider adding)' }}"
+      
+    # ========================================================================
+    # Post-deployment Validation
+    # ========================================================================
+    
+    - name: "[Validation] Verify PostgreSQL pod is running"
+      command: >
+        kubectl get pods -n {{ namespace_default }} 
+        -l app.kubernetes.io/name=postgresql 
+        -o jsonpath='{.items[*].status.phase}'
+      register: pod_status
+      changed_when: false
+      failed_when: "'Running' not in pod_status.stdout"
+      
+    - name: "[Validation] Check pod restarts"
+      command: >
+        kubectl get pods -n {{ namespace_default }} 
+        -l app.kubernetes.io/name=postgresql 
+        -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}'
+      register: restart_count
+      changed_when: false
+      
+    - name: "[Validation] Display restart count"
+      debug:
+        msg: "{{ 'Pod restarts: ' + restart_count.stdout + ' (OK)' if restart_count.stdout | int < 3 else 'WARNING: High restart count (' + restart_count.stdout + ')' }}"
+      
+    # ========================================================================
+    # Stack Deployment Summary
+    # ========================================================================
+    
+    - name: "[Summary] Display Database Stack deployment results"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║           DATABASE STACK DEPLOYMENT COMPLETE                  ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "📊 Stack Information:"
+          - "  • Stack Name: Database Stack (Stack 2/5)"
+          - "  • Blast Radius: ~20%"
+          - "  • Dependencies: Network Stack"
+          - "  • Deployment Time: {{ ansible_date_time.time }}"
+          - ""
+          - "✅ Components Deployed:"
+          - "  • PostgreSQL: {{ pod_status.stdout }} ({{ pg_version.stdout | trim }})"
+          - "  • StorageClass: {{ storage_class_name }} ({{ sc_verify.stdout }})"
+          - "  • PVC Status: {{ pvc_status.stdout }} ({{ pvc_size.stdout }})"
+          - "  • Health: {{ db_health.stdout }}"
+          - "  • Connections: {{ db_connections.stdout }} active"
+          - "  • Restarts: {{ restart_count.stdout }}"
+          - ""
+          - "🔐 Database Credentials:"
+          - "  • Username: postgres"
+          - "  • Password: <stored in secret postgresdb-postgresql>"
+          - "  • Connection: <stored in secret postgres-connection>"
+          - ""
+          - "💾 Storage Configuration:"
+          - "  • Storage Class: {{ storage_class_name }}"
+          - "  • Volume Size: {{ postgres_volume_size }}"
+          - "  • Storage Type: {{ storage_type }}"
+          - "  • Provisioner: {{ sc_verify.stdout }}"
+          - ""
+          - "🔍 Validation Commands:"
+          - "  • kubectl get pods -l app.kubernetes.io/name=postgresql"
+          - "  • kubectl get pvc -l app.kubernetes.io/name=postgresql"
+          - "  • kubectl exec deployment/postgresdb-postgresql -- pg_isready"
+          - "  • kubectl logs deployment/postgresdb-postgresql"
+          - ""
+          - "📝 Connection String (from pod):"
+          - "  postgresql://postgres:PASSWORD@postgresdb-postgresql:5432/postgres"
+          - ""
+          - "⚠️  Important Notes:"
+          - "  • Password stored in Kubernetes Secret (never commit)"
+          - "  • Volume persists even if pod is deleted"
+          - "  • Consider setting up automated backups"
+          - "  • Monitor disk usage: kubectl top pods"
+          - ""
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║   Chapter 5: Micro Stack Pattern - Database Stack Ready      ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"

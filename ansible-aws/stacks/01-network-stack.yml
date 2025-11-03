@@ -1,0 +1,308 @@
+---
+# Stack 1: Network Stack
+# Chapter 5: Micro Stack Pattern - Page 62
+# 
+# Purpose: Base networking infrastructure (AWS-managed in EKS)
+# Blast Radius: ~15% (rarely changes, but affects everything)
+# Dependencies: None (foundation layer)
+# Deploy Frequency: Once per environment (rarely updated)
+
+- name: Network Stack - VPC and Networking (AWS EKS)
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars_files:
+    - ../shared-vars.yml
+  
+  tasks:
+    # ========================================================================
+    # Important Note
+    # ========================================================================
+    
+    - name: "[Info] Network Stack Overview"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║                    NETWORK STACK (Stack 1/5)                   ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "📋 AWS EKS Networking Model:"
+          - ""
+          - "In AWS EKS, networking is primarily managed by AWS CloudFormation"
+          - "when eksctl creates the cluster. This stack validates and documents"
+          - "the network configuration rather than creating resources."
+          - ""
+          - "For a full Infrastructure-as-Code approach with Terraform or"
+          - "Pulumi, this stack would create:"
+          - "  • VPC with CIDR blocks"
+          - "  • Public and Private subnets across AZs"
+          - "  • Internet Gateway"
+          - "  • NAT Gateways"
+          - "  • Route Tables"
+          - "  • Security Groups"
+          - ""
+          - "In our eksctl-based deployment, these are created automatically"
+          - "based on cluster-config.yaml specifications."
+          - ""
+    
+    # ========================================================================
+    # Pre-deployment Validation
+    # ========================================================================
+    
+    - name: "[Validation] Check AWS CLI is available"
+      command: aws --version
+      register: aws_check
+      changed_when: false
+      failed_when: aws_check.rc != 0
+      
+    - name: "[Validation] Verify AWS credentials"
+      command: aws sts get-caller-identity
+      register: aws_identity
+      changed_when: false
+      failed_when: aws_identity.rc != 0
+      
+    - name: "[Validation] Display AWS account"
+      debug:
+        msg: "Connected to AWS Account: {{ (aws_identity.stdout | from_json).Account }}"
+      
+    # ========================================================================
+    # VPC Discovery (if cluster exists)
+    # ========================================================================
+    
+    - name: "[Network] Check if EKS cluster exists"
+      command: >
+        aws eks describe-cluster 
+        --name {{ cluster_name }} 
+        --region {{ aws_region }}
+      register: cluster_info
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Network] Extract VPC ID (if cluster exists)"
+      set_fact:
+        vpc_id: "{{ (cluster_info.stdout | from_json).cluster.resourcesVpcConfig.vpcId }}"
+      when: cluster_info.rc == 0
+      
+    - name: "[Network] Display VPC ID"
+      debug:
+        msg: "{{ 'VPC ID: ' + vpc_id if cluster_info.rc == 0 else 'Cluster not yet created - VPC will be created by eksctl' }}"
+      
+    - name: "[Network] Get VPC CIDR (if exists)"
+      command: >
+        aws ec2 describe-vpcs 
+        --vpc-ids {{ vpc_id }} 
+        --region {{ aws_region }} 
+        --query 'Vpcs[0].CidrBlock' 
+        --output text
+      register: vpc_cidr
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Network] Display VPC CIDR"
+      debug:
+        msg: "VPC CIDR: {{ vpc_cidr.stdout }}"
+      when: cluster_info.rc == 0
+      
+    # ========================================================================
+    # Subnet Discovery
+    # ========================================================================
+    
+    - name: "[Network] Get cluster subnets (if exists)"
+      set_fact:
+        subnet_ids: "{{ (cluster_info.stdout | from_json).cluster.resourcesVpcConfig.subnetIds }}"
+      when: cluster_info.rc == 0
+      
+    - name: "[Network] Count subnets"
+      debug:
+        msg: "Subnets: {{ subnet_ids | length }} ({{ subnet_ids | join(', ') }})"
+      when: cluster_info.rc == 0
+      
+    - name: "[Network] Get subnet details"
+      command: >
+        aws ec2 describe-subnets 
+        --subnet-ids {{ subnet_ids | join(' ') }} 
+        --region {{ aws_region }} 
+        --query 'Subnets[*].[SubnetId,AvailabilityZone,CidrBlock,MapPublicIpOnLaunch]' 
+        --output table
+      register: subnet_details
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Network] Display subnet details"
+      debug:
+        msg: "{{ subnet_details.stdout_lines }}"
+      when: cluster_info.rc == 0
+      
+    # ========================================================================
+    # Security Groups Discovery
+    # ========================================================================
+    
+    - name: "[Security] Get cluster security group"
+      set_fact:
+        cluster_sg: "{{ (cluster_info.stdout | from_json).cluster.resourcesVpcConfig.clusterSecurityGroupId }}"
+      when: cluster_info.rc == 0
+      
+    - name: "[Security] Display cluster security group"
+      debug:
+        msg: "Cluster Security Group: {{ cluster_sg }}"
+      when: cluster_info.rc == 0
+      
+    - name: "[Security] Get security group rules"
+      command: >
+        aws ec2 describe-security-groups 
+        --group-ids {{ cluster_sg }} 
+        --region {{ aws_region }} 
+        --query 'SecurityGroups[0].IpPermissions[*].[IpProtocol,FromPort,ToPort,IpRanges[0].CidrIp]' 
+        --output table
+      register: sg_rules
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Security] Display security group rules"
+      debug:
+        msg: "{{ sg_rules.stdout_lines }}"
+      when: cluster_info.rc == 0
+      
+    # ========================================================================
+    # Internet Gateway and NAT Gateway Discovery
+    # ========================================================================
+    
+    - name: "[Gateways] Find Internet Gateway"
+      command: >
+        aws ec2 describe-internet-gateways 
+        --filters "Name=attachment.vpc-id,Values={{ vpc_id }}" 
+        --region {{ aws_region }} 
+        --query 'InternetGateways[0].InternetGatewayId' 
+        --output text
+      register: igw_id
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Gateways] Display Internet Gateway"
+      debug:
+        msg: "Internet Gateway: {{ igw_id.stdout }}"
+      when: cluster_info.rc == 0
+      
+    - name: "[Gateways] Find NAT Gateways"
+      command: >
+        aws ec2 describe-nat-gateways 
+        --filter "Name=vpc-id,Values={{ vpc_id }}" 
+        --region {{ aws_region }} 
+        --query 'NatGateways[*].[NatGatewayId,State,SubnetId]' 
+        --output table
+      register: nat_gateways
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Gateways] Display NAT Gateways"
+      debug:
+        msg: "{{ nat_gateways.stdout_lines }}"
+      when: cluster_info.rc == 0
+      
+    # ========================================================================
+    # Route Tables Discovery
+    # ========================================================================
+    
+    - name: "[Routes] Get route tables"
+      command: >
+        aws ec2 describe-route-tables 
+        --filters "Name=vpc-id,Values={{ vpc_id }}" 
+        --region {{ aws_region }} 
+        --query 'RouteTables[*].RouteTableId' 
+        --output text
+      register: route_tables
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Routes] Count route tables"
+      debug:
+        msg: "Route Tables: {{ route_tables.stdout.split() | length }} ({{ route_tables.stdout }})"
+      when: cluster_info.rc == 0
+      
+    # ========================================================================
+    # Network Validation
+    # ========================================================================
+    
+    - name: "[Validation] Verify VPC has DNS support"
+      command: >
+        aws ec2 describe-vpc-attribute 
+        --vpc-id {{ vpc_id }} 
+        --attribute enableDnsSupport 
+        --region {{ aws_region }} 
+        --query 'EnableDnsSupport.Value' 
+        --output text
+      register: dns_support
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Validation] Verify VPC has DNS hostnames"
+      command: >
+        aws ec2 describe-vpc-attribute 
+        --vpc-id {{ vpc_id }} 
+        --attribute enableDnsHostnames 
+        --region {{ aws_region }} 
+        --query 'EnableDnsHostnames.Value' 
+        --output text
+      register: dns_hostnames
+      changed_when: false
+      when: cluster_info.rc == 0
+      
+    - name: "[Validation] Display DNS configuration"
+      debug:
+        msg:
+          - "DNS Support: {{ dns_support.stdout }}"
+          - "DNS Hostnames: {{ dns_hostnames.stdout }}"
+      when: cluster_info.rc == 0
+      
+    # ========================================================================
+    # Stack Deployment Summary
+    # ========================================================================
+    
+    - name: "[Summary] Display Network Stack summary"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║            NETWORK STACK VALIDATION COMPLETE                  ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "📊 Stack Information:"
+          - "  • Stack Name: Network Stack (Stack 1/5)"
+          - "  • Blast Radius: ~15%"
+          - "  • Dependencies: None (foundation)"
+          - "  • Deployment Time: {{ ansible_date_time.time }}"
+          - ""
+          - "{{ '✅ Network Configuration (Cluster: ' + cluster_name + ')' if cluster_info.rc == 0 else '⚠️  Cluster not yet created - network will be provisioned by eksctl' }}"
+          - "{{ '  • VPC ID: ' + vpc_id if cluster_info.rc == 0 else '' }}"
+          - "{{ '  • VPC CIDR: ' + vpc_cidr.stdout if cluster_info.rc == 0 else '' }}"
+          - "{{ '  • Subnets: ' + (subnet_ids | length | string) + ' across AZs' if cluster_info.rc == 0 else '' }}"
+          - "{{ '  • Security Groups: ' + cluster_sg if cluster_info.rc == 0 else '' }}"
+          - "{{ '  • Internet Gateway: ' + igw_id.stdout if cluster_info.rc == 0 else '' }}"
+          - "{{ '  • DNS Support: ' + dns_support.stdout if cluster_info.rc == 0 else '' }}"
+          - ""
+          - "🏗️  Network Architecture (AWS EKS Standard):"
+          - "  • Public Subnets: For LoadBalancers and NAT Gateways"
+          - "  • Private Subnets: For EKS worker nodes"
+          - "  • Multi-AZ: High availability across zones"
+          - "  • VPC CNI: AWS native networking for pods"
+          - ""
+          - "📝 Network Management:"
+          - "  • Created by: eksctl (CloudFormation)"
+          - "  • Managed by: AWS"
+          - "  • Defined in: cluster-config.yaml"
+          - "  • Change frequency: Rarely (once per environment)"
+          - ""
+          - "🔍 AWS Console Commands:"
+          - "  • View VPC: aws ec2 describe-vpcs --vpc-ids {{ vpc_id if cluster_info.rc == 0 else 'VPC_ID' }}"
+          - "  • View Subnets: aws ec2 describe-subnets --filters Name=vpc-id,Values={{ vpc_id if cluster_info.rc == 0 else 'VPC_ID' }}"
+          - "  • View Security Groups: aws ec2 describe-security-groups --group-ids {{ cluster_sg if cluster_info.rc == 0 else 'SG_ID' }}"
+          - ""
+          - "⚠️  Important Notes:"
+          - "  • In eksctl-based deployments, networking is declarative"
+          - "  • VPC is created automatically on first cluster creation"
+          - "  • For full IaC control, consider Terraform or Pulumi"
+          - "  • Network changes require cluster recreation (high risk)"
+          - ""
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║    Chapter 5: Micro Stack Pattern - Network Stack Ready      ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"

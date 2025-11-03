@@ -1,0 +1,113 @@
+---
+# Shared Variables for Micro Stack Architecture
+# Chapter 5: Building Infrastructure Stacks as Code
+# Pattern: Micro Stack (Page 62)
+
+# ============================================================================
+# AWS Configuration
+# ============================================================================
+aws_region: us-east-1
+aws_account_id: "978848629209"
+
+# ============================================================================
+# Cluster Configuration
+# ============================================================================
+cluster_name: k8s-autoscaling-cluster
+cluster_version: "1.28"
+node_instance_type: t3.small
+node_min_size: 2
+node_max_size: 5
+node_desired_size: 2
+
+# ============================================================================
+# Namespaces
+# ============================================================================
+namespace_default: default
+namespace_monitoring: monitoring
+namespace_kube_system: kube-system
+
+# ============================================================================
+# Container Images (from ECR)
+# ============================================================================
+ecr_registry: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com"
+app_image: "{{ ecr_registry }}/do-sample-app"
+app_version: v1.0.0
+drift_monitor_image: "{{ ecr_registry }}/drift-monitor"
+drift_monitor_version: v1.0.0
+
+# ============================================================================
+# Storage Configuration
+# ============================================================================
+storage_class_name: ebs-sc
+storage_type: gp3
+postgres_volume_size: 10Gi
+
+# ============================================================================
+# Database Configuration
+# ============================================================================
+postgres_chart_version: "12.1.2"
+postgres_chart_repo: https://charts.bitnami.com/bitnami
+postgres_persistence_enabled: true
+postgres_volume_permissions: true
+
+# ============================================================================
+# Monitoring Configuration
+# ============================================================================
+prometheus_chart_version: "latest"
+prometheus_chart_repo: https://prometheus-community.github.io/helm-charts
+grafana_service_type: LoadBalancer
+grafana_admin_password_secret: prometheus-grafana
+
+# ============================================================================
+# Application Configuration
+# ============================================================================
+app_replicas: 1
+app_hpa_min_replicas: 1
+app_hpa_max_replicas: 10
+app_hpa_cpu_threshold: 50
+app_hpa_memory_threshold: 80
+app_service_type: LoadBalancer
+app_port: 8080
+
+# ============================================================================
+# Autoscaling Configuration
+# ============================================================================
+cluster_autoscaler_version: v1.28.2
+metrics_server_version: v0.6.4
+
+# ============================================================================
+# Network Policy Configuration
+# ============================================================================
+network_policies_enabled: true
+calico_version: v3.27.0
+
+# ============================================================================
+# Resource Tags (for AWS resources)
+# ============================================================================
+common_tags:
+  Environment: production
+  Project: k8s-autoscaling
+  ManagedBy: ansible-micro-stacks
+  Chapter: "5-micro-stacks"
+  IaC: "true"
+
+# ============================================================================
+# Paths
+# ============================================================================
+manifests_dir: "../manifests-aws"
+kubeconfig_path: "~/.kube/config"
+
+# ============================================================================
+# Timeouts and Retries
+# ============================================================================
+kubectl_wait_timeout: 300
+helm_install_timeout: 600
+retry_count: 3
+retry_delay: 10
+
+# ============================================================================
+# Stack Metadata (for tracking)
+# ============================================================================
+stack_version: "1.0.0"
+stack_deployment_date: "{{ ansible_date_time.date }}"
+stack_deployed_by: "{{ ansible_user_id }}"

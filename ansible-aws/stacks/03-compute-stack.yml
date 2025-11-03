@@ -1,0 +1,361 @@
+---
+# Stack 3: Compute Stack
+# Chapter 5: Micro Stack Pattern - Page 62
+# 
+# Purpose: Kubernetes compute resources and cluster infrastructure
+# Blast Radius: ~30% (affects all workloads)
+# Dependencies: Network Stack
+# Deploy Frequency: Monthly (node updates, K8s version upgrades)
+
+- name: Compute Stack - EKS Cluster and Node Groups
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  
+  vars_files:
+    - ../shared-vars.yml
+  
+  tasks:
+    # ========================================================================
+    # Pre-deployment Validation
+    # ========================================================================
+    
+    - name: "[Validation] Check if eksctl is installed"
+      command: eksctl version
+      register: eksctl_check
+      changed_when: false
+      failed_when: eksctl_check.rc != 0
+      
+    - name: "[Validation] Check if kubectl is installed"
+      command: kubectl version --client --short
+      register: kubectl_check
+      changed_when: false
+      failed_when: kubectl_check.rc != 0
+      
+    - name: "[Validation] Check AWS CLI credentials"
+      command: aws sts get-caller-identity
+      register: aws_check
+      changed_when: false
+      failed_when: aws_check.rc != 0
+      
+    - name: "[Validation] Display AWS identity"
+      debug:
+        msg: "AWS Account: {{ (aws_check.stdout | from_json).Account }} (User: {{ (aws_check.stdout | from_json).Arn }})"
+      
+    # ========================================================================
+    # EKS Cluster Check/Creation
+    # ========================================================================
+    
+    - name: "[Cluster] Check if EKS cluster exists"
+      command: >
+        aws eks describe-cluster 
+        --name {{ cluster_name }} 
+        --region {{ aws_region }}
+      register: cluster_exists
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Cluster] Display cluster status"
+      debug:
+        msg: "{{ 'Cluster ' + cluster_name + ' already exists' if cluster_exists.rc == 0 else 'Cluster not found - ready to create' }}"
+    
+    - name: "[Cluster] Create EKS cluster (if not exists)"
+      command: >
+        eksctl create cluster -f ../cluster-config.yaml
+      when: cluster_exists.rc != 0
+      register: cluster_create
+      async: 1200
+      poll: 30
+      
+    - name: "[Cluster] Wait for cluster to be active"
+      command: >
+        aws eks describe-cluster 
+        --name {{ cluster_name }} 
+        --region {{ aws_region }} 
+        --query 'cluster.status' 
+        --output text
+      register: cluster_status
+      until: cluster_status.stdout == "ACTIVE"
+      retries: 40
+      delay: 30
+      changed_when: false
+      when: cluster_create is changed
+      
+    - name: "[Cluster] Update kubeconfig"
+      command: >
+        aws eks update-kubeconfig 
+        --name {{ cluster_name }} 
+        --region {{ aws_region }}
+      changed_when: false
+      
+    - name: "[Cluster] Verify kubectl can connect"
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+      failed_when: cluster_info.rc != 0
+      
+    # ========================================================================
+    # Node Groups Verification
+    # ========================================================================
+    
+    - name: "[Nodes] Get node list"
+      command: kubectl get nodes --no-headers
+      register: nodes_list
+      changed_when: false
+      
+    - name: "[Nodes] Count nodes"
+      set_fact:
+        node_count: "{{ nodes_list.stdout_lines | length }}"
+      
+    - name: "[Nodes] Display node count"
+      debug:
+        msg: "Cluster has {{ node_count }} nodes (min: {{ node_min_size }}, max: {{ node_max_size }})"
+      
+    - name: "[Nodes] Get node details"
+      command: >
+        kubectl get nodes 
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.kubeletVersion}{"\t"}{.status.capacity.cpu}{"\t"}{.status.capacity.memory}{"\n"}{end}'
+      register: node_details
+      changed_when: false
+      
+    # ========================================================================
+    # EBS CSI Driver Installation
+    # ========================================================================
+    
+    - name: "[CSI] Check if EBS CSI driver addon exists"
+      command: >
+        eksctl get addon 
+        --name aws-ebs-csi-driver 
+        --cluster {{ cluster_name }} 
+        --region {{ aws_region }}
+      register: csi_addon_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[CSI] Install EBS CSI driver addon"
+      command: >
+        eksctl create addon 
+        --name aws-ebs-csi-driver 
+        --cluster {{ cluster_name }} 
+        --region {{ aws_region }} 
+        --service-account-role-arn arn:aws:iam::{{ aws_account_id }}:role/AmazonEKS_EBS_CSI_DriverRole 
+        --force
+      when: csi_addon_check.rc != 0
+      register: csi_install
+      
+    - name: "[CSI] Wait for CSI driver pods"
+      command: >
+        kubectl wait --for=condition=ready pod 
+        -n kube-system 
+        -l app.kubernetes.io/name=aws-ebs-csi-driver 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: csi_install is changed
+      
+    - name: "[CSI] Verify CSI driver"
+      command: >
+        kubectl get pods -n kube-system 
+        -l app.kubernetes.io/name=aws-ebs-csi-driver 
+        -o jsonpath='{.items[*].status.phase}'
+      register: csi_status
+      changed_when: false
+      
+    # ========================================================================
+    # Metrics Server Installation
+    # ========================================================================
+    
+    - name: "[Metrics] Check if Metrics Server is installed"
+      command: >
+        kubectl get deployment metrics-server 
+        -n kube-system
+      register: metrics_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Metrics] Install Metrics Server"
+      command: >
+        kubectl apply -f 
+        https://github.com/kubernetes-sigs/metrics-server/releases/download/{{ metrics_server_version }}/components.yaml
+      when: metrics_check.rc != 0
+      
+    - name: "[Metrics] Wait for Metrics Server"
+      command: >
+        kubectl wait --for=condition=available deployment/metrics-server 
+        -n kube-system 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: metrics_check.rc != 0
+      
+    - name: "[Metrics] Verify Metrics Server"
+      command: kubectl top nodes
+      register: metrics_verify
+      changed_when: false
+      retries: "{{ retry_count }}"
+      delay: "{{ retry_delay }}"
+      until: metrics_verify.rc == 0
+      
+    # ========================================================================
+    # Cluster Autoscaler Deployment
+    # ========================================================================
+    
+    - name: "[Autoscaler] Check if Cluster Autoscaler is deployed"
+      command: >
+        kubectl get deployment cluster-autoscaler 
+        -n kube-system
+      register: ca_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Autoscaler] Apply Cluster Autoscaler manifest"
+      command: >
+        kubectl apply -f {{ manifests_dir }}/cluster-autoscaler.yaml
+      when: ca_check.rc != 0
+      
+    - name: "[Autoscaler] Wait for Cluster Autoscaler"
+      command: >
+        kubectl wait --for=condition=available deployment/cluster-autoscaler 
+        -n kube-system 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: ca_check.rc != 0
+      
+    - name: "[Autoscaler] Verify Cluster Autoscaler"
+      command: >
+        kubectl get pods -n kube-system 
+        -l app=cluster-autoscaler 
+        -o jsonpath='{.items[*].status.phase}'
+      register: ca_status
+      changed_when: false
+      
+    - name: "[Autoscaler] Get Cluster Autoscaler logs (last 10 lines)"
+      shell: >
+        kubectl logs -n kube-system 
+        -l app=cluster-autoscaler 
+        --tail=10 
+        | grep -E 'Cluster autoscaler|Scale|node' || true
+      register: ca_logs
+      changed_when: false
+      
+    # ========================================================================
+    # Calico Installation (for Network Policies - Chapter 3)
+    # ========================================================================
+    
+    - name: "[Calico] Check if Calico is installed"
+      command: >
+        kubectl get pods -n kube-system 
+        -l k8s-app=calico-node 
+        --no-headers
+      register: calico_check
+      changed_when: false
+      failed_when: false
+      
+    - name: "[Calico] Install Calico (policy-only mode)"
+      command: >
+        kubectl apply -f 
+        https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico-policy-only.yaml
+      when: 
+        - calico_check.rc != 0
+        - network_policies_enabled | bool
+      register: calico_install
+      
+    - name: "[Calico] Wait for Calico pods"
+      command: >
+        kubectl wait --for=condition=ready pod 
+        -n kube-system 
+        -l k8s-app=calico-node 
+        --timeout={{ kubectl_wait_timeout }}s
+      when: calico_install is changed
+      
+    - name: "[Calico] Count Calico nodes"
+      shell: >
+        kubectl get pods -n kube-system 
+        -l k8s-app=calico-node 
+        --no-headers | wc -l
+      register: calico_count
+      changed_when: false
+      when: network_policies_enabled | bool
+      
+    # ========================================================================
+    # Post-deployment Validation
+    # ========================================================================
+    
+    - name: "[Health Check] Verify all nodes are Ready"
+      command: >
+        kubectl get nodes 
+        -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}'
+      register: nodes_ready
+      changed_when: false
+      failed_when: "'False' in nodes_ready.stdout or nodes_ready.stdout == ''"
+      
+    - name: "[Health Check] Check system pods"
+      command: >
+        kubectl get pods -n kube-system 
+        --field-selector=status.phase!=Running,status.phase!=Succeeded 
+        --no-headers
+      register: failed_pods
+      changed_when: false
+      
+    - name: "[Health Check] Display system pod health"
+      debug:
+        msg: "{{ 'All system pods healthy' if failed_pods.stdout == '' else 'WARNING: Some pods not running: ' + failed_pods.stdout }}"
+      
+    # ========================================================================
+    # Stack Deployment Summary
+    # ========================================================================
+    
+    - name: "[Summary] Display Compute Stack deployment results"
+      debug:
+        msg:
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║            COMPUTE STACK DEPLOYMENT COMPLETE                  ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
+          - ""
+          - "📊 Stack Information:"
+          - "  • Stack Name: Compute Stack (Stack 3/5)"
+          - "  • Blast Radius: ~30%"
+          - "  • Dependencies: Network Stack"
+          - "  • Deployment Time: {{ ansible_date_time.time }}"
+          - ""
+          - "✅ EKS Cluster:"
+          - "  • Name: {{ cluster_name }}"
+          - "  • Region: {{ aws_region }}"
+          - "  • Version: {{ cluster_version }}"
+          - "  • Status: {{ cluster_status.stdout | default('ACTIVE') }}"
+          - ""
+          - "✅ Node Groups:"
+          - "  • Current Nodes: {{ node_count }}"
+          - "  • Min Size: {{ node_min_size }}"
+          - "  • Max Size: {{ node_max_size }}"
+          - "  • Instance Type: {{ node_instance_type }}"
+          - "  • All Nodes: {{ nodes_ready.stdout.split() | length }} Ready"
+          - ""
+          - "✅ Components Deployed:"
+          - "  • EBS CSI Driver: {{ csi_status.stdout }}"
+          - "  • Metrics Server: Available"
+          - "  • Cluster Autoscaler: {{ ca_status.stdout }}"
+          - "  • Calico (Network Policies): {{ calico_count.stdout + ' nodes' if network_policies_enabled else 'Not enabled' }}"
+          - ""
+          - "📈 Autoscaling Status:"
+          - "  • Pod-level: HPA ready (requires Metrics Server ✅)"
+          - "  • Node-level: Cluster Autoscaler running ✅"
+          - "  • Current capacity: {{ node_count }} nodes"
+          - "  • Scale range: {{ node_min_size }}-{{ node_max_size }} nodes"
+          - ""
+          - "🔍 Node Details:"
+          - "{{ node_details.stdout }}"
+          - ""
+          - "📊 Metrics Server Test:"
+          - "{{ metrics_verify.stdout }}"
+          - ""
+          - "🔍 Validation Commands:"
+          - "  • kubectl get nodes"
+          - "  • kubectl top nodes"
+          - "  • kubectl get pods -n kube-system"
+          - "  • kubectl logs -n kube-system -l app=cluster-autoscaler"
+          - ""
+          - "⚠️  Important Notes:"
+          - "  • Cluster creation takes ~15 minutes on first run"
+          - "  • Node scaling can take 2-5 minutes"
+          - "  • Metrics Server needs ~2 minutes to collect data"
+          - "  • Calico is in policy-only mode (coexists with AWS VPC CNI)"
+          - ""
+          - "╔═══════════════════════════════════════════════════════════════╗"
+          - "║   Chapter 5: Micro Stack Pattern - Compute Stack Ready       ║"
+          - "╚═══════════════════════════════════════════════════════════════╝"
