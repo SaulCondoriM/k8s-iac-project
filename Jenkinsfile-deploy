@@ -68,6 +68,7 @@ spec:
                     dir('code') {
                         sh '''
                             go version
+                            go mod tidy
                             go build -o app main.go
                             ls -lh app
                             echo "✅ Go binary built successfully"
