@@ -61,8 +61,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := PageData{
-		Title:   "Hello, Go Server!",
-		Message: "This is server-side rendered content in Go.",
+		Title:   "🚀 Jenkins CI/CD Pipeline - DEMO EN VIVO",
+		Message: "✅ ¡Desplegado automáticamente con Jenkins! Build #" + os.Getenv("BUILD_NUMBER"),
 		Posts:   posts,
 	}
 
