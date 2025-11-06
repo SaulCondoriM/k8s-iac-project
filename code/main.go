@@ -61,8 +61,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := PageData{
-		Title:   "🚀 CI/CD Automático con Jenkins + GitHub",
-		Message: "✅ ¡FUNCIONA! Cambio detectado y desplegado automáticamente. Build #" + os.Getenv("BUILD_NUMBER"),
+		Title:   "🎯 Pipeline Completo Jenkins + EKS + ECR",
+		Message: "🚀 ¡CI/CD 100% AUTOMÁTICO! Cambio #2 - Build #" + os.Getenv("BUILD_NUMBER"),
 		Posts:   posts,
 	}
 
