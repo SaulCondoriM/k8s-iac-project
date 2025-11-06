@@ -61,8 +61,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := PageData{
-		Title:   "Simple Blog",
-		Message: "🚀 TEST JENKINS",
+		Title:   "Simple Blog TEST",
+		Message: "🚀 DEPLOY",
 		Posts:   posts,
 	}
 
