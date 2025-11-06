@@ -1,0 +1,200 @@
+#!/usr/bin/env groovy
+
+/**
+ * Jenkinsfile - Auto Deploy Pipeline
+ * 
+ * Trigger: Poll SCM cada 5 minutos
+ * Stages: Build Docker → Push ECR → Deploy EKS → Verify
+ */
+
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  serviceAccountName: default
+  containers:
+  - name: golang
+    image: golang:1.21-alpine
+    command:
+    - sleep
+    args:
+    - 99d
+  - name: docker
+    image: docker:24-dind
+    securityContext:
+      privileged: true
+    env:
+    - name: DOCKER_TLS_CERTDIR
+      value: ""
+  - name: kubectl
+    image: alpine/k8s:1.28.3
+    command:
+    - sleep
+    args:
+    - 99d
+'''
+        }
+    }
+    
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT = '978848629209'
+        ECR_REGISTRY = '978848629209.dkr.ecr.us-east-1.amazonaws.com'
+        IMAGE_NAME = 'do-sample-app'
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
+    }
+    
+    stages {
+        stage('📋 Info') {
+            steps {
+                echo "========================================="
+                echo "🚀 JENKINS AUTO-DEPLOY PIPELINE"
+                echo "========================================="
+                echo "Build: #${env.BUILD_NUMBER}"
+                echo "Branch: ${env.GIT_BRANCH}"
+                echo "Commit: ${env.GIT_COMMIT}"
+                echo "Image: ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+                echo "========================================="
+            }
+        }
+        
+        stage('🔨 Build App') {
+            steps {
+                container('golang') {
+                    echo "📦 Building Go application..."
+                    dir('code') {
+                        sh '''
+                            go version
+                            go build -o app main.go
+                            ls -lh app
+                            echo "✅ Go binary built successfully"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('🐳 Build Docker Image') {
+            steps {
+                container('docker') {
+                    echo "🐳 Building Docker image..."
+                    dir('code') {
+                        sh """
+                            # Wait for Docker daemon
+                            timeout 30 sh -c 'until docker ps; do sleep 1; done'
+                            
+                            # Build image
+                            docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                            docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_NAME}:latest
+                            
+                            echo "✅ Docker image built: ${IMAGE_NAME}:${IMAGE_TAG}"
+                            docker images | grep ${IMAGE_NAME}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('☁️ Push to ECR') {
+            steps {
+                container('docker') {
+                    echo "📤 Pushing to AWS ECR..."
+                    sh """
+                        # Install AWS CLI
+                        apk add --no-cache aws-cli
+                        
+                        # Login to ECR
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                            docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                        
+                        # Tag for ECR
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                        docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ECR_REGISTRY}/${IMAGE_NAME}:latest
+                        
+                        # Push to ECR
+                        docker push ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+                        docker push ${ECR_REGISTRY}/${IMAGE_NAME}:latest
+                        
+                        echo "✅ Images pushed to ECR"
+                    """
+                }
+            }
+        }
+        
+        stage('🚀 Deploy to EKS') {
+            steps {
+                container('kubectl') {
+                    echo "🎯 Deploying to EKS cluster..."
+                    sh """
+                        echo "Current deployment:"
+                        kubectl get deployment do-sample-app -n default || echo "Deployment not found"
+                        
+                        echo ""
+                        echo "Updating deployment with new image..."
+                        kubectl set image deployment/do-sample-app \
+                            do-sample-app=${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
+                            -n default
+                        
+                        echo ""
+                        echo "Waiting for rollout to complete..."
+                        kubectl rollout status deployment/do-sample-app -n default --timeout=5m
+                        
+                        echo "✅ Deployment completed successfully!"
+                    """
+                }
+            }
+        }
+        
+        stage('✅ Verify Deployment') {
+            steps {
+                container('kubectl') {
+                    echo "🔍 Verifying deployment..."
+                    sh """
+                        echo "Pods status:"
+                        kubectl get pods -n default -l app=do-sample-app -o wide
+                        
+                        echo ""
+                        echo "Deployment info:"
+                        kubectl describe deployment do-sample-app -n default | grep -A 5 "Replicas:"
+                        
+                        echo ""
+                        echo "Service URL:"
+                        APP_URL=\$(kubectl get svc do-sample-app-service -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                        echo "🌐 Application: http://\$APP_URL"
+                        
+                        echo ""
+                        echo "✅ Deployment verified!"
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo ""
+            echo "========================================="
+            echo "🎉 DEPLOYMENT SUCCESSFUL!"
+            echo "========================================="
+            echo "Build: #${env.BUILD_NUMBER}"
+            echo "Image: ${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+            echo "Status: ✅ DEPLOYED"
+            echo "========================================="
+        }
+        failure {
+            echo ""
+            echo "========================================="
+            echo "❌ DEPLOYMENT FAILED"
+            echo "========================================="
+            echo "Build: #${env.BUILD_NUMBER}"
+            echo "Check logs above for errors"
+            echo "========================================="
+        }
+        always {
+            echo "Pipeline execution completed"
+        }
+    }
+}
