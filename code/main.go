@@ -61,8 +61,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := PageData{
-		Title:   "🚀 CI/CD Automático con Jenkins + GitHub",
-		Message: "✅ ¡FUNCIONA! Job recreado - Despliegue automático activo",
+		Title:   "TEST 5",
+		Message: "✅ ¡PERFECTO! Jenkins detecta cambios cada minuto - Build #" + os.Getenv("BUILD_NUMBER"),
 		Posts:   posts,
 	}
 
