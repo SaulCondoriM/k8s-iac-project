@@ -61,8 +61,8 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := PageData{
-		Title:   "Simple Blog TEST 4",
-		Message: "🚀 DEPLOY",
+		Title:   "🚀 CI/CD Automático con Jenkins + GitHub",
+		Message: "✅ ¡FUNCIONA! Job recreado - Despliegue automático activo",
 		Posts:   posts,
 	}
 
