@@ -61,7 +61,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := PageData{
-		Title:   "TEST 5",
+		Title:   "TEST DE JENKINS CI CON GO Y POSTGRES",
 		Message: "✅ ¡PERFECTO! Jenkins detecta cambios cada minuto - Build #" + os.Getenv("BUILD_NUMBER"),
 		Posts:   posts,
 	}
